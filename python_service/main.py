@@ -23,6 +23,11 @@ from python_service import jobs as job_store
 from python_service.ingestion.pipeline import run_ingestion_pipeline
 from python_service.retrieval.hybrid import retrieve
 from python_service.retrieval.evidence import package_evidence
+from python_service.generation.context import build_prompt
+from python_service.generation.gemini import generate_draft
+from python_service.generation.grounding import verify_draft
+from python_service.evaluation.draft_judge import judge_draft
+from python_service.db.models import Draft
 
 logging.basicConfig(
     level=logging.INFO,
@@ -255,4 +260,114 @@ async def query_document(body: dict):
         "retrieval_method": result.retrieval_method,
         "evidence": [e.to_dict() for e in evidence_items],
         "prompt_blocks": [e.to_prompt_block() for e in evidence_items],
+    }
+
+
+@app.post("/draft")
+async def generate_document_draft(body: dict):
+    """
+    Full generation pipeline: retrieve evidence → build prompt → Gemini draft
+    → NLI grounding check → judge score → save to SQLite.
+
+    Body: {
+      "document_id": "...",
+      "query": "Summarize the compensation and termination terms",
+      "draft_type": "case_fact_summary"   (optional, default: case_fact_summary)
+    }
+
+    Returns the full draft with inline [E1] citations, grounding score,
+    and independent judge scores. Refuses to deliver if grounding < 0.50.
+    """
+    import json as _json
+
+    document_id = body.get("document_id")
+    query = body.get("query", "").strip()
+    draft_type = body.get("draft_type", "case_fact_summary")
+
+    if not document_id:
+        raise HTTPException(status_code=400, detail="'document_id' is required")
+    if not query:
+        raise HTTPException(status_code=400, detail="'query' is required")
+
+    # ── Step 1: Retrieve evidence ────────────────────────────────────────────
+    with Session(engine) as session:
+        doc = session.get(Document, document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Document {document_id!r} not found")
+
+    retrieval_result = retrieve(query, document_id)
+    if not retrieval_result.sufficient:
+        return {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "diagnostic": retrieval_result.diagnostic,
+        }
+
+    evidence_items = package_evidence(retrieval_result.evidence, document_title=doc.title)
+    evidence_dicts = [e.to_dict() for e in evidence_items]
+
+    # ── Step 2: Build prompt + generate draft ────────────────────────────────
+    prompt = build_prompt(
+        evidence_items=evidence_items,
+        draft_type=draft_type,
+        document_title=doc.title,
+    )
+    raw_draft = generate_draft(prompt)
+    sections = raw_draft.get("sections", [])
+
+    # ── Step 3: Grounding verification ──────────────────────────────────────
+    evidence_map = {e.evidence_id: e.content for e in evidence_items}
+    grounding = verify_draft(sections, evidence_map)
+
+    if grounding.status == "LOW":
+        return {
+            "status": "INSUFFICIENT_GROUNDING",
+            "grounding_score": grounding.grounding_score,
+            "diagnostic": grounding.diagnostic,
+            "warnings": [w.warning_type + ": " + w.sentence[:100] for w in grounding.warnings],
+        }
+
+    # ── Step 4: Judge score ──────────────────────────────────────────────────
+    judge_scores = judge_draft(sections, evidence_dicts)
+
+    # ── Step 5: Save to SQLite ───────────────────────────────────────────────
+    draft_id = str(uuid.uuid4())
+    with Session(engine) as session:
+        draft_row = Draft(
+            draft_id=draft_id,
+            document_id=document_id,
+            draft_type=draft_type,
+            title=raw_draft.get("title", query),
+            sections_json=_json.dumps(sections),
+            grounding_score=grounding.grounding_score,
+            warnings_json=_json.dumps([
+                {"type": w.warning_type, "sentence": w.sentence, "evidence_id": w.evidence_id}
+                for w in grounding.warnings
+            ]),
+            judge_scores_json=_json.dumps(judge_scores),
+            applied_pattern_ids_json="[]",
+            processing_meta_json=_json.dumps({
+                "generationModel": "gemini-2.5-flash",
+                "judgeModel": "llama-3.3-70b-versatile",
+                "retrievalMethod": retrieval_result.retrieval_method,
+                "evidenceIds": [e.evidence_id for e in evidence_items],
+            }),
+        )
+        session.add(draft_row)
+        session.commit()
+
+    return {
+        "status": "ok",
+        "draft_id": draft_id,
+        "document_id": document_id,
+        "draft_type": draft_type,
+        "title": raw_draft.get("title", ""),
+        "sections": sections,
+        "grounding_score": grounding.grounding_score,
+        "grounding_status": grounding.status,
+        "warnings": [
+            {"type": w.warning_type, "sentence": w.sentence[:120]}
+            for w in grounding.warnings
+        ],
+        "judge_scores": judge_scores,
+        "evidence_used": [e.evidence_id for e in evidence_items],
     }
