@@ -32,6 +32,7 @@ from python_service.edit_loop.capture import store_edits
 from python_service.edit_loop.processor import process_edit
 from python_service.edit_loop.pattern_retriever import retrieve_patterns
 from python_service.evaluation.adherence_checker import check_adherence
+from python_service.evaluation.improvement_validator import compute_improvement_report
 
 logging.basicConfig(
     level=logging.INFO,
@@ -479,4 +480,95 @@ async def list_patterns():
             }
             for p in patterns
         ],
+    }
+
+
+@app.get("/metrics")
+async def get_metrics():
+    """
+    System-wide metrics: document/draft/edit/pattern counts and
+    average quality scores.  Use this as a dashboard summary.
+    """
+    import json as _json
+    from sqlmodel import select, func
+    from python_service.db.models import Document, Chunk, Draft, Edit, Pattern
+
+    with Session(engine) as session:
+        doc_count = session.exec(select(func.count()).select_from(Document)).one()
+        chunk_count = session.exec(select(func.count()).select_from(Chunk)).one()
+        draft_count = session.exec(select(func.count()).select_from(Draft)).one()
+        edit_count = session.exec(select(func.count()).select_from(Edit)).one()
+        pattern_count = session.exec(
+            select(func.count()).select_from(Pattern).where(Pattern.is_active == True)
+        ).one()
+        drafts = session.exec(select(Draft)).all()
+
+    grounding_scores = [d.grounding_score for d in drafts if d.grounding_score > 0]
+    judge_scores = []
+    for d in drafts:
+        try:
+            s = _json.loads(d.judge_scores_json or "{}")
+            if s.get("overall"):
+                judge_scores.append(float(s["overall"]))
+        except (ValueError, TypeError):
+            pass
+
+    def _avg(vals):
+        return round(sum(vals) / len(vals), 3) if vals else None
+
+    return {
+        "counts": {
+            "documents": doc_count,
+            "chunks": chunk_count,
+            "drafts": draft_count,
+            "edits_submitted": edit_count,
+            "patterns_active": pattern_count,
+        },
+        "quality": {
+            "avg_grounding_score": _avg(grounding_scores),
+            "avg_judge_overall": _avg(judge_scores),
+            "drafts_scored": len(judge_scores),
+        },
+    }
+
+
+@app.get("/evaluation/improvement-report")
+async def improvement_report():
+    """
+    Compare draft quality before vs after pattern learning.
+
+    Splits drafts into two cohorts:
+      - before: no patterns were injected (applied_pattern_ids_json = [])
+      - after:  at least one pattern was applied
+
+    Returns average grounding + judge scores per cohort and the delta.
+    """
+    report = compute_improvement_report()
+    return {
+        "has_data": report.has_data,
+        "message": report.message,
+        "before_patterns": {
+            "draft_count": report.before.count,
+            "avg_grounding_score": report.before.avg_grounding,
+            "avg_judge_scores": {
+                "groundedness": report.before.avg_groundedness,
+                "completeness": report.before.avg_completeness,
+                "structure": report.before.avg_structure,
+                "overall": report.before.avg_overall,
+            },
+        },
+        "after_patterns": {
+            "draft_count": report.after.count,
+            "avg_grounding_score": report.after.avg_grounding,
+            "avg_judge_scores": {
+                "groundedness": report.after.avg_groundedness,
+                "completeness": report.after.avg_completeness,
+                "structure": report.after.avg_structure,
+                "overall": report.after.avg_overall,
+            },
+        },
+        "delta": {
+            "grounding_score": report.delta_grounding,
+            "overall_judge_score": report.delta_overall,
+        },
     }
