@@ -76,60 +76,62 @@ def process_edit(edit_id: str) -> None:
             return
 
         # ── Step 4: Save pattern to SQLite ───────────────────────────────────
+        # Capture plain values from pattern_dict now — after session closes,
+        # SQLAlchemy detaches the ORM object and attribute access raises DetachedInstanceError.
+        rule_type = pattern_dict.get("rule_type", edit_type.lower())
+        description = pattern_dict["description"]
+        few_shot_before = pattern_dict.get("few_shot_before", "")
+        few_shot_after = pattern_dict.get("few_shot_after", "")
+        confidence = float(pattern_dict.get("confidence", 0.5))
+        applicable_doc_types = pattern_dict.get("applicable_document_types", [document_type])
+        applicable_draft_types_list = pattern_dict.get("applicable_draft_types", [draft_type])
+        applicable_section_types = pattern_dict.get("applicable_section_types", [])
+
         pattern_id = str(uuid.uuid4())
-        pattern_row = Pattern(
-            pattern_id=pattern_id,
-            source_edit_ids_json=json.dumps([edit_id]),
-            rule_type=pattern_dict.get("rule_type", edit_type.lower()),
-            description=pattern_dict["description"],
-            few_shot_before=pattern_dict.get("few_shot_before", ""),
-            few_shot_after=pattern_dict.get("few_shot_after", ""),
-            applicable_document_types_json=json.dumps(
-                pattern_dict.get("applicable_document_types", [document_type])
-            ),
-            applicable_draft_types_json=json.dumps(
-                pattern_dict.get("applicable_draft_types", [draft_type])
-            ),
-            applicable_section_types_json=json.dumps(
-                pattern_dict.get("applicable_section_types", [])
-            ),
-            frequency=1,
-            operator_consensus=1.0,
-            confidence=float(pattern_dict.get("confidence", 0.5)),
-            is_active=True,
-            operator_ids_json=json.dumps([edit.operator_id if False else "op_harvey"]),
-        )
         with Session(engine) as session:
-            # Re-fetch edit inside same session to get operator_id
             stored_edit = session.get(Edit, edit_id)
-            if stored_edit:
-                pattern_row.operator_ids_json = json.dumps([stored_edit.operator_id])
+            operator_id = stored_edit.operator_id if stored_edit else "op_harvey"
+            pattern_row = Pattern(
+                pattern_id=pattern_id,
+                source_edit_ids_json=json.dumps([edit_id]),
+                rule_type=rule_type,
+                description=description,
+                few_shot_before=few_shot_before,
+                few_shot_after=few_shot_after,
+                applicable_document_types_json=json.dumps(applicable_doc_types),
+                applicable_draft_types_json=json.dumps(applicable_draft_types_list),
+                applicable_section_types_json=json.dumps(applicable_section_types),
+                frequency=1,
+                operator_consensus=1.0,
+                confidence=confidence,
+                is_active=True,
+                operator_ids_json=json.dumps([operator_id]),
+            )
             session.add(pattern_row)
             session.commit()
 
         # ── Step 5: Embed description → upsert to Qdrant ─────────────────────
         try:
-            vector = embed_one(pattern_dict["description"])
-            qdrant_store.upsert_pattern(
-                point_id=pattern_id,
-                vector=vector,
+            vector = embed_one(description)
+            qdrant_point_id = qdrant_store.upsert_pattern(
+                pattern_id=pattern_id,
+                principle_vector=vector,
                 payload={
                     "pattern_id": pattern_id,
-                    "rule_type": pattern_row.rule_type,
-                    "description": pattern_row.description,
-                    "few_shot_before": pattern_row.few_shot_before,
-                    "few_shot_after": pattern_row.few_shot_after,
-                    "confidence": pattern_row.confidence,
+                    "rule_type": rule_type,
+                    "description": description,
+                    "few_shot_before": few_shot_before,
+                    "few_shot_after": few_shot_after,
+                    "confidence": confidence,
                     "is_active": True,
-                    "document_types": pattern_dict.get("applicable_document_types", []),
-                    "draft_types": pattern_dict.get("applicable_draft_types", []),
+                    "document_types": applicable_doc_types,
+                    "draft_types": applicable_draft_types_list,
                 },
             )
-            # Store the Qdrant point_id back on the SQLite row
             with Session(engine) as session:
                 p = session.get(Pattern, pattern_id)
                 if p:
-                    p.qdrant_point_id = pattern_id
+                    p.qdrant_point_id = qdrant_point_id
                     session.add(p)
                     session.commit()
         except Exception as exc:
@@ -139,7 +141,7 @@ def process_edit(edit_id: str) -> None:
         _mark_edit(edit_id, "extracted", classification, pattern_id=pattern_id)
         logger.info(
             "Edit %s → pattern %s stored [%s]: %s",
-            edit_id, pattern_id, pattern_row.rule_type, pattern_row.description[:60],
+            edit_id, pattern_id, rule_type, description[:60],
         )
 
     except Exception as exc:

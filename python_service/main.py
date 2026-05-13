@@ -30,6 +30,8 @@ from python_service.evaluation.draft_judge import judge_draft
 from python_service.db.models import Draft
 from python_service.edit_loop.capture import store_edits
 from python_service.edit_loop.processor import process_edit
+from python_service.edit_loop.pattern_retriever import retrieve_patterns
+from python_service.evaluation.adherence_checker import check_adherence
 
 logging.basicConfig(
     level=logging.INFO,
@@ -307,16 +309,24 @@ async def generate_document_draft(body: dict):
     evidence_items = package_evidence(retrieval_result.evidence, document_title=doc.title)
     evidence_dicts = [e.to_dict() for e in evidence_items]
 
-    # ── Step 2: Build prompt + generate draft ────────────────────────────────
+    # ── Step 2: Fetch learned patterns for this query ────────────────────────
+    patterns = retrieve_patterns(
+        query=query,
+        document_type=getattr(doc, "document_type", "unknown"),
+        draft_type=draft_type,
+    )
+
+    # ── Step 3: Build prompt + generate draft ────────────────────────────────
     prompt = build_prompt(
         evidence_items=evidence_items,
         draft_type=draft_type,
         document_title=doc.title,
+        patterns=patterns or None,
     )
     raw_draft = generate_draft(prompt)
     sections = raw_draft.get("sections", [])
 
-    # ── Step 3: Grounding verification ──────────────────────────────────────
+    # ── Step 4: Grounding verification ──────────────────────────────────────
     evidence_map = {e.evidence_id: e.content for e in evidence_items}
     grounding = verify_draft(sections, evidence_map)
 
@@ -328,11 +338,15 @@ async def generate_document_draft(body: dict):
             "warnings": [w.warning_type + ": " + w.sentence[:100] for w in grounding.warnings],
         }
 
-    # ── Step 4: Judge score ──────────────────────────────────────────────────
+    # ── Step 5: Adherence check — did Gemini follow injected patterns? ───────
+    adherence = check_adherence(sections, patterns)
+
+    # ── Step 6: Judge score ──────────────────────────────────────────────────
     judge_scores = judge_draft(sections, evidence_dicts)
 
-    # ── Step 5: Save to SQLite ───────────────────────────────────────────────
+    # ── Step 7: Save to SQLite ───────────────────────────────────────────────
     draft_id = str(uuid.uuid4())
+    applied_pattern_ids = [p["pattern_id"] for p in patterns]
     with Session(engine) as session:
         draft_row = Draft(
             draft_id=draft_id,
@@ -346,12 +360,14 @@ async def generate_document_draft(body: dict):
                 for w in grounding.warnings
             ]),
             judge_scores_json=_json.dumps(judge_scores),
-            applied_pattern_ids_json="[]",
+            applied_pattern_ids_json=_json.dumps(applied_pattern_ids),
             processing_meta_json=_json.dumps({
                 "generationModel": "gemini-2.5-flash",
                 "judgeModel": "llama-3.3-70b-versatile",
                 "retrievalMethod": retrieval_result.retrieval_method,
                 "evidenceIds": [e.evidence_id for e in evidence_items],
+                "patternsApplied": len(patterns),
+                "adherenceScore": adherence["adherence_score"],
             }),
         )
         session.add(draft_row)
@@ -370,6 +386,9 @@ async def generate_document_draft(body: dict):
             {"type": w.warning_type, "sentence": w.sentence[:120]}
             for w in grounding.warnings
         ],
+        "patterns_applied": len(patterns),
+        "adherence_score": adherence["adherence_score"],
+        "adherence_detail": adherence["detail"],
         "judge_scores": judge_scores,
         "evidence_used": [e.evidence_id for e in evidence_items],
     }
