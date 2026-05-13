@@ -16,11 +16,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlmodel import Session
 
 from python_service.config import settings
-from python_service.db.models import Document
+from python_service.db.models import Chunk, Document
 from python_service.db.session import create_db_and_tables, engine
 from python_service.vector.qdrant_store import qdrant_store
 from python_service import jobs as job_store
 from python_service.ingestion.pipeline import run_ingestion_pipeline
+from python_service.retrieval.hybrid import retrieve
+from python_service.retrieval.evidence import package_evidence
 
 logging.basicConfig(
     level=logging.INFO,
@@ -158,12 +160,7 @@ async def upload_file(
 
 @app.get("/job/{job_id}")
 async def get_job(job_id: str):
-    """
-    Poll the status of a background pipeline job.
-
-    Returns status (pending|running|done|failed), current stage,
-    progress 0-100, and result/error when finished.
-    """
+    """Poll the status of a background pipeline job."""
     job = job_store.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
@@ -177,4 +174,85 @@ async def get_job(job_id: str):
         "error": job.error,
         "created_at": job.created_at.isoformat(),
         "updated_at": job.updated_at.isoformat(),
+    }
+
+
+@app.get("/documents/{document_id}/chunks")
+async def get_chunks(document_id: str):
+    """
+    List all chunks stored for a document.
+    Useful for verifying the chunker worked correctly after upload.
+    """
+    from sqlmodel import Session, select
+    with Session(engine) as session:
+        chunks = session.exec(
+            select(Chunk).where(Chunk.document_id == document_id)
+        ).all()
+
+    if not chunks:
+        raise HTTPException(status_code=404, detail=f"No chunks found for document {document_id!r}")
+
+    return {
+        "document_id": document_id,
+        "chunk_count": len(chunks),
+        "chunks": [
+            {
+                "chunk_id": c.chunk_id,
+                "title": c.title,
+                "breadcrumb": c.breadcrumb,
+                "structural_level": c.structural_level,
+                "token_estimate": c.token_estimate,
+                "page_range": c.page_range_json,
+                "ocr_confidence_avg": c.ocr_confidence_avg,
+                "has_low_conf_regions": c.has_low_conf_regions,
+                "content_preview": c.content[:200] + "..." if len(c.content) > 200 else c.content,
+            }
+            for c in chunks
+        ],
+    }
+
+
+@app.post("/query")
+async def query_document(body: dict):
+    """
+    Run hybrid retrieval (BM25 + dense + rerank) against a document.
+
+    Body: { "document_id": "...", "query": "What are the payment terms?" }
+
+    Returns top-5 evidence items with [E1]-[E5] labels, scores, and breadcrumbs.
+    If evidence is insufficient, returns a diagnostic message instead.
+    """
+    document_id = body.get("document_id")
+    query = body.get("query", "").strip()
+
+    if not document_id:
+        raise HTTPException(status_code=400, detail="'document_id' is required")
+    if not query:
+        raise HTTPException(status_code=400, detail="'query' is required")
+
+    # Fetch document title for the evidence package
+    with Session(engine) as session:
+        doc = session.get(Document, document_id)
+    doc_title = doc.title if doc else document_id
+
+    # Run the full hybrid retrieval pipeline
+    result = retrieve(query, document_id)
+
+    if not result.sufficient:
+        return {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "query": query,
+            "diagnostic": result.diagnostic,
+            "evidence": [],
+        }
+
+    evidence_items = package_evidence(result.evidence, document_title=doc_title)
+
+    return {
+        "status": "ok",
+        "query": query,
+        "document_id": document_id,
+        "retrieval_method": result.retrieval_method,
+        "evidence": [e.to_dict() for e in evidence_items],
+        "prompt_blocks": [e.to_prompt_block() for e in evidence_items],
     }
