@@ -28,6 +28,8 @@ from python_service.generation.gemini import generate_draft
 from python_service.generation.grounding import verify_draft
 from python_service.evaluation.draft_judge import judge_draft
 from python_service.db.models import Draft
+from python_service.edit_loop.capture import store_edits
+from python_service.edit_loop.processor import process_edit
 
 logging.basicConfig(
     level=logging.INFO,
@@ -370,4 +372,92 @@ async def generate_document_draft(body: dict):
         ],
         "judge_scores": judge_scores,
         "evidence_used": [e.evidence_id for e in evidence_items],
+    }
+
+
+@app.post("/feedback")
+async def submit_feedback(body: dict, background_tasks: BackgroundTasks):
+    """
+    Submit operator edits for a draft. Triggers pattern learning in the background.
+
+    Body:
+    {
+      "draft_id": "...",
+      "edits": [
+        {
+          "section_id": "sec_1",
+          "section_title": "Company Termination",
+          "original_text": "The employee will get 3x salary...",
+          "edited_text": "Employee shall receive a lump sum equal to three (3) times Base Compensation..."
+        }
+      ]
+    }
+
+    Returns immediately with edit_ids. Pattern extraction runs in the background.
+    Poll GET /patterns to see extracted patterns.
+    """
+    draft_id = body.get("draft_id")
+    edits = body.get("edits", [])
+
+    if not draft_id:
+        raise HTTPException(status_code=400, detail="'draft_id' is required")
+    if not edits or not isinstance(edits, list):
+        raise HTTPException(status_code=400, detail="'edits' must be a non-empty list")
+
+    # Verify draft exists
+    with Session(engine) as session:
+        draft = session.get(Draft, draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail=f"Draft {draft_id!r} not found")
+
+    # Store raw edits (fast — just SQL INSERTs)
+    try:
+        edit_ids = store_edits(
+            draft_id=draft_id,
+            edits=edits,
+            operator_id=settings.default_operator_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    # Classify + extract patterns in the background (slow — Groq LLM calls)
+    for edit_id in edit_ids:
+        background_tasks.add_task(process_edit, edit_id)
+
+    return {
+        "status": "accepted",
+        "draft_id": draft_id,
+        "edits_received": len(edits),
+        "edits_stored": len(edit_ids),
+        "edit_ids": edit_ids,
+        "message": f"Pattern extraction running in background for {len(edit_ids)} edit(s).",
+    }
+
+
+@app.get("/patterns")
+async def list_patterns():
+    """List all active learned patterns stored in SQLite."""
+    from sqlmodel import select
+    from python_service.db.models import Pattern
+
+    with Session(engine) as session:
+        patterns = session.exec(
+            select(Pattern).where(Pattern.is_active == True)
+        ).all()
+
+    return {
+        "pattern_count": len(patterns),
+        "patterns": [
+            {
+                "pattern_id": p.pattern_id,
+                "rule_type": p.rule_type,
+                "description": p.description,
+                "few_shot_before": p.few_shot_before,
+                "few_shot_after": p.few_shot_after,
+                "confidence": p.confidence,
+                "frequency": p.frequency,
+                "created_at": p.created_at.isoformat(),
+            }
+            for p in patterns
+        ],
     }
