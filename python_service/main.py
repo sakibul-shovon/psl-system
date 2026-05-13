@@ -1,23 +1,23 @@
 """
 FastAPI entrypoint.
 
-This file is what `uvicorn python_service.main:app` runs. Right now it only has
-a /health endpoint — as we build out the pipeline (ingestion, retrieval,
-generation, edit loop) we'll wire each module's routes into this app.
+`uvicorn python_service.main:app --reload` starts the server.
+Routes are added here as each phase is built; all pipeline logic
+lives in submodules (ingestion/, retrieval/, generation/, etc.).
 """
 
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from python_service.config import settings
+from python_service.db.session import create_db_and_tables
+from python_service.vector.qdrant_store import qdrant_store
+from python_service import jobs as job_store
 
-# ─── Logging setup ────────────────────────────────────────────────────────
-# One stdlib logger configured at module load. Subsequent modules just
-# `logger = logging.getLogger(__name__)` and inherit this configuration.
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -26,24 +26,30 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# ─── Lifespan: code that runs on app startup and shutdown ─────────────────
-# The async context manager pattern is FastAPI's recommended replacement for
-# the older @app.on_event("startup") decorator (which is deprecated).
-# Code before `yield` runs at startup; after `yield` runs at shutdown.
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Booting PSL Document Intelligence service...")
 
-    # Make sure local data directories exist (idempotent — safe to call every boot)
+    # Create local data directories
     for d in [Path("./data"), settings.bm25_dir, settings.uploads_dir]:
         d.mkdir(parents=True, exist_ok=True)
 
-    logger.info("PSL service ready. Tesseract: %s", settings.tesseract_cmd)
+    # Create SQLite tables (idempotent — safe on every restart)
+    create_db_and_tables()
+
+    # Bootstrap Qdrant collections (idempotent — skipped if already exist)
+    try:
+        qdrant_store.ensure_collections()
+    except Exception as exc:
+        # Non-fatal at boot: if Qdrant isn't up yet, the first upload will fail
+        # with a clear error rather than preventing the app from starting.
+        logger.warning("Qdrant not reachable at startup: %s", exc)
+
+    logger.info("PSL service ready. OCR: tesseract | DB: SQLite | Vectors: Qdrant")
     yield
     logger.info("PSL service shutting down.")
 
 
-# ─── App instance ─────────────────────────────────────────────────────────
 app = FastAPI(
     title="Pearson Specter Litt — Document Intelligence",
     version="0.1.0",
@@ -54,9 +60,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Allow the Streamlit UI (default port 8501) to call this API from the browser.
-# In production you'd lock this down to a specific origin; for local dev this
-# is fine.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],
@@ -66,14 +69,11 @@ app.add_middleware(
 )
 
 
-# ─── Routes ───────────────────────────────────────────────────────────────
+# ─── Routes ───────────────────────────────────────────────────────────────────
+
 @app.get("/health")
 async def health():
-    """
-    Liveness + environment sanity check.
-    Hit this first when debugging — it tells you what config the app loaded
-    and which optional integrations are configured.
-    """
+    """Liveness + config sanity check. Hit this first when debugging."""
     return {
         "status": "ok",
         "service": "psl-document-intelligence",
@@ -88,9 +88,32 @@ async def health():
 
 @app.get("/")
 async def root():
-    """Friendly landing message."""
     return {
         "service": "Pearson Specter Litt — Document Intelligence",
         "docs": "/docs",
         "health": "/health",
+    }
+
+
+@app.get("/job/{job_id}")
+async def get_job(job_id: str):
+    """
+    Poll the status of a background pipeline job.
+
+    Returns status (pending|running|done|failed), current stage,
+    progress 0-100, and result/error when finished.
+    """
+    job = job_store.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job {job_id!r} not found")
+    return {
+        "job_id": job.job_id,
+        "document_id": job.document_id,
+        "status": job.status,
+        "stage": job.stage,
+        "progress": job.progress,
+        "result": job.result,
+        "error": job.error,
+        "created_at": job.created_at.isoformat(),
+        "updated_at": job.updated_at.isoformat(),
     }
