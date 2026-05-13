@@ -1,0 +1,37 @@
+# ─── Web framework ────────────────────────────────────────────────────────
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+python-multipart==0.0.10        # required for file uploads
+pydantic==2.9.2
+pydantic-settings==2.5.2        # loads .env into typed config object
+python-dotenv==1.0.1
+
+# ─── Persistence ──────────────────────────────────────────────────────────
+sqlmodel==0.0.22                # SQLAlchemy + Pydantic in one library
+qdrant-client==1.12.0           # vector database client
+
+# ─── Retrieval + ML ───────────────────────────────────────────────────────
+sentence-transformers==3.1.1    # pulls in torch + transformers automatically
+rank-bm25==0.2.2                # pure-Python BM25 index
+numpy==1.26.4                   # pinned to <2.0 for compat with older ML libs
+
+# ─── PDF + OCR ────────────────────────────────────────────────────────────
+pypdf==5.0.1                    # text-layer extraction from PDFs
+pypdfium2==4.30.0               # PDF → image rendering (no system poppler needed)
+pytesseract==0.3.13             # Python wrapper around the Tesseract binary
+opencv-python-headless==4.10.0.84   # image preprocessing (deskew, binarize, denoise)
+Pillow==10.4.0                  # image manipulation
+
+# ─── LLM clients ──────────────────────────────────────────────────────────
+google-generativeai==0.8.3      # Gemini
+groq==0.11.0                    # Groq (LLaMA models)
+
+# ─── Utilities ────────────────────────────────────────────────────────────
+httpx==0.27.2
+python-Levenshtein==0.26.0      # fast edit distance for metrics later
+
+# ─── UI ───────────────────────────────────────────────────────────────────
+streamlit==1.39.0
+
+# ─── Dev / tests ──────────────────────────────────────────────────────────
+pytest==8.3.3

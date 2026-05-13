@@ -1,0 +1,13 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    container_name: psl_qdrant
+    ports:
+      - "6333:6333"     # HTTP API and dashboard
+      - "6334:6334"     # gRPC (we won't use it, but expose for tools)
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: unless-stopped
+
+volumes:
+  qdrant_data:

@@ -1,0 +1,31 @@
+# ─── Secrets and local data ──────────────────────────────────────────────
+.env
+data/psl.db
+data/psl.db-journal
+data/bm25/
+data/uploads/
+
+# ─── Python ──────────────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ─── IDE ─────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+
+# ─── OS ──────────────────────────────────────────────────────────────────
+Thumbs.db
+.DS_Store
+
+# ─── Model caches (large, downloaded on first run) ───────────────────────
+# sentence-transformers and HF caches live in user home by default;
+# but if they end up in the project, ignore them:
+.cache/
+huggingface/
