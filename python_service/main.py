@@ -7,16 +7,20 @@ lives in submodules (ingestion/, retrieval/, generation/, etc.).
 """
 
 import logging
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from sqlmodel import Session
 
 from python_service.config import settings
-from python_service.db.session import create_db_and_tables
+from python_service.db.models import Document
+from python_service.db.session import create_db_and_tables, engine
 from python_service.vector.qdrant_store import qdrant_store
 from python_service import jobs as job_store
+from python_service.ingestion.pipeline import run_ingestion_pipeline
 
 logging.basicConfig(
     level=logging.INFO,
@@ -92,6 +96,63 @@ async def root():
         "service": "Pearson Specter Litt — Document Intelligence",
         "docs": "/docs",
         "health": "/health",
+    }
+
+
+@app.post("/upload")
+async def upload_file(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+):
+    """
+    Accept a PDF or image file, save it, and kick off the ingestion pipeline.
+
+    Returns immediately with a jobId. Poll GET /job/{jobId} to track progress.
+    The pipeline runs in the background: route → normalize → extract → chunk →
+    embed → store (Qdrant + SQLite + BM25).
+    """
+    # Validate file type before doing any work
+    allowed = {".pdf", ".jpg", ".jpeg", ".png", ".tiff", ".tif"}
+    suffix = Path(file.filename).suffix.lower()
+    if suffix not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type {suffix!r}. Allowed: {', '.join(allowed)}",
+        )
+
+    # Generate IDs up front so we can link the job → document immediately
+    document_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+
+    # Save the uploaded file to disk
+    safe_name = f"{document_id}{suffix}"
+    save_path = settings.uploads_dir / safe_name
+    contents = await file.read()
+    save_path.write_bytes(contents)
+
+    # Create Document row in SQLite (minimal — pipeline fills in the rest)
+    with Session(engine) as session:
+        doc = Document(
+            document_id=document_id,
+            title=file.filename,
+            file_path=str(save_path),
+            file_type=suffix.lstrip("."),
+            operator_id=settings.default_operator_id,
+        )
+        session.add(doc)
+        session.commit()
+
+    # Register the job so GET /job/{id} works immediately
+    job_store.create_job(job_id, document_id=document_id)
+
+    # Start the pipeline in the background — this returns right away
+    background_tasks.add_task(run_ingestion_pipeline, save_path, document_id, job_id)
+
+    return {
+        "job_id": job_id,
+        "document_id": document_id,
+        "filename": file.filename,
+        "message": "Upload received. Poll GET /job/{job_id} for progress.",
     }
 
 

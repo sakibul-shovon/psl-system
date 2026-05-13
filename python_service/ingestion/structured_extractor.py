@@ -43,7 +43,7 @@ _EXTRACTION_PROMPT = """\
 You are a legal document metadata extractor. Extract structured fields from the document text below.
 
 Return ONLY valid JSON matching this exact schema — no markdown, no explanation:
-{
+{{
   "documentType": "string (one of: lease_agreement, service_agreement, employment_contract, nda, court_filing, settlement_agreement, corporate_resolution, unknown)",
   "parties": ["list of party names as strings"],
   "dates": ["list of important dates as strings, e.g. 'January 15, 2024'"],
@@ -52,7 +52,7 @@ Return ONLY valid JSON matching this exact schema — no markdown, no explanatio
   "jurisdiction": "string (state/country, or 'unknown')",
   "governingLaw": "string (governing law clause text, or 'unknown')",
   "summary": "string (one sentence describing what this document is about)"
-}
+}}
 
 If a field cannot be determined from the text, use an empty list [] or the string "unknown".
 Do not invent information not present in the text.
