@@ -1,0 +1,70 @@
+{
+  "status": "ok",
+  "draft_id": "b1a2s3e4-0000-4000-a000-000000000001",
+  "document_id": "doc-clean-contract-001",
+  "draft_type": "case_fact_summary",
+  "title": "Employment Terms Summary \u2014 Specter (Baseline, No Patterns)",
+  "sections": [
+    {
+      "section_id": "sec_1",
+      "section_title": "Parties and Effective Date",
+      "content": "Based on the agreement, it appears that Pearson Specter Litt LLP and Harvey Reginald Specter entered into this employment arrangement sometime around early 2025. The document seems to establish an employment relationship between the law firm and the individual, though the precise effective date may require further verification. [E1]",
+      "evidence_ids": [
+        "E1"
+      ]
+    },
+    {
+      "section_id": "sec_2",
+      "section_title": "Compensation Structure",
+      "content": "The employee appears to be entitled to receive some form of annual compensation. The document references a salary amount, performance-related payments, and potentially some form of profit participation. The exact figures may need to be confirmed against the original document. [E2][E3]",
+      "evidence_ids": [
+        "E2",
+        "E3"
+      ]
+    },
+    {
+      "section_id": "sec_3",
+      "section_title": "Termination Provisions",
+      "content": "The agreement contains provisions related to termination. There appear to be different scenarios depending on whether the termination is with or without cause. Some form of notice period is mentioned, and there may be severance obligations in certain circumstances. [E4]",
+      "evidence_ids": [
+        "E4"
+      ]
+    },
+    {
+      "section_id": "sec_4",
+      "section_title": "Confidentiality and IP",
+      "content": "The employee has certain confidentiality obligations that appear to continue after the employment ends. There are also provisions related to intellectual property, though the scope of these obligations may vary depending on interpretation. [E5]",
+      "evidence_ids": [
+        "E5"
+      ]
+    }
+  ],
+  "grounding_score": 0.714,
+  "grounding_status": "OK",
+  "warnings": [
+    {
+      "type": "HEDGE_LANGUAGE",
+      "sentence": "The exact figures may need to be confirmed against the original document."
+    },
+    {
+      "type": "WEAK_CITATION",
+      "sentence": "the precise effective date may require further verification."
+    }
+  ],
+  "patterns_applied": 0,
+  "adherence_score": 0.0,
+  "adherence_detail": [],
+  "judge_scores": {
+    "groundedness": 7.1,
+    "completeness": 6.7,
+    "structure": 7.2,
+    "overall": 7.0
+  },
+  "evidence_used": [
+    "E1",
+    "E2",
+    "E3",
+    "E4",
+    "E5"
+  ]
+}

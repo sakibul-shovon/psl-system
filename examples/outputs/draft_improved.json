@@ -1,0 +1,80 @@
+{
+  "status": "ok",
+  "draft_id": "i1m2p3r4-0000-4000-b000-000000000002",
+  "document_id": "doc-clean-contract-001",
+  "draft_type": "case_fact_summary",
+  "title": "Employment Terms Summary \u2014 Specter (Improved, 3 Patterns Applied)",
+  "sections": [
+    {
+      "section_id": "sec_1",
+      "section_title": "Parties and Effective Date",
+      "content": "This Employment Agreement was entered into as of January 1, 2025 (\"Effective Date\") between Pearson Specter Litt LLP (\"Firm\") and Harvey Reginald Specter (\"Employee\"). [E1]",
+      "evidence_ids": [
+        "E1"
+      ]
+    },
+    {
+      "section_id": "sec_2",
+      "section_title": "Compensation Structure",
+      "content": "Employee shall receive: (i) a Base Salary of $800,000 per annum; (ii) an annual performance bonus of up to 100% of Base Salary contingent on metrics set by the Managing Partner; and (iii) a fifteen percent (15%) partnership interest in net profits, distributed quarterly. [E2][E3]",
+      "evidence_ids": [
+        "E2",
+        "E3"
+      ]
+    },
+    {
+      "section_id": "sec_3",
+      "section_title": "Termination Provisions",
+      "content": "The Firm may terminate without Cause upon sixty (60) days' written notice, triggering a lump-sum severance equal to twelve (12) months of Base Salary. Termination for Cause is immediate upon written notice and carries no severance obligation. [E4]",
+      "evidence_ids": [
+        "E4"
+      ]
+    },
+    {
+      "section_id": "sec_4",
+      "section_title": "Confidentiality and IP Assignment",
+      "content": "Employee's confidentiality obligations survive termination indefinitely. All Work Product created during employment is the exclusive property of the Firm; Employee hereby assigns all right, title, and interest therein. [E5]",
+      "evidence_ids": [
+        "E5"
+      ]
+    }
+  ],
+  "grounding_score": 0.891,
+  "grounding_status": "OK",
+  "warnings": [],
+  "patterns_applied": 3,
+  "adherence_score": 0.833,
+  "adherence_detail": [
+    {
+      "pattern_id": "pat-001",
+      "description": "Use 'shall receive' not 'may be entitled to' for compensation obligations",
+      "followed": true,
+      "evidence": "Employee shall receive: (i) a Base Salary..."
+    },
+    {
+      "pattern_id": "pat-002",
+      "description": "Spell out dollar amounts then parenthetical figure \u2014 e.g. 'Eight Hundred Thousand Dollars ($800,000)'",
+      "followed": false,
+      "evidence": "Used '$800,000' shorthand only in sec_2"
+    },
+    {
+      "pattern_id": "pat-003",
+      "description": "Termination without Cause: lead with the notice period, then the severance trigger",
+      "followed": true,
+      "evidence": "sixty (60) days' written notice, triggering a lump-sum severance..."
+    }
+  ],
+  "judge_scores": {
+    "groundedness": 8.6,
+    "completeness": 8.3,
+    "structure": 8.7,
+    "overall": 8.5
+  },
+  "evidence_used": [
+    "E1",
+    "E2",
+    "E3",
+    "E4",
+    "E5"
+  ]
+}

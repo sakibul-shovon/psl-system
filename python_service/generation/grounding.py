@@ -120,8 +120,9 @@ def verify_draft(
                 evidence_id=eid,
                 nli_label=label,
             ))
-        else:   # NEUTRAL — paraphrase of evidence; not wrong, but flag for transparency
-            verified += 1
+        else:   # NEUTRAL — premise neither supports nor refutes; NOT verified.
+            # Counting NEUTRAL as verified would inflate the grounding score on
+            # vague paraphrases that don't actually entail the claim.
             warnings.append(GroundingWarning(
                 warning_type="WEAK_GROUNDING",
                 sentence=sentence,

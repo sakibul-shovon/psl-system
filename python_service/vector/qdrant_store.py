@@ -230,6 +230,11 @@ class QdrantStore:
         Search learned_patterns. Used for:
           - Dedup check at storage time (look for cosine > 0.85)
           - Pattern retrieval at generation time (top-10 → composite re-rank → top-5)
+
+        `document_types` filter restricts results to patterns whose stored
+        `document_types` payload field overlaps with the provided list.
+        Without this, a pattern learned from a lease would be retrieved for
+        an employment contract draft.
         """
         must_conditions = []
 
@@ -238,6 +243,17 @@ class QdrantStore:
                 qmodels.FieldCondition(
                     key="is_active",
                     match=qmodels.MatchValue(value=True),
+                )
+            )
+
+        if document_types:
+            # MatchAny matches when the payload list contains ANY of the values.
+            # We use it because the stored payload is a list ("document_types"),
+            # not a single keyword.
+            must_conditions.append(
+                qmodels.FieldCondition(
+                    key="document_types",
+                    match=qmodels.MatchAny(any=document_types),
                 )
             )
 

@@ -1,0 +1,22 @@
+{
+  "before": {
+    "count": 10,
+    "avg_grounding": 0.703,
+    "avg_groundedness": 7.04,
+    "avg_completeness": 6.81,
+    "avg_structure": 7.12,
+    "avg_overall": 6.99
+  },
+  "after": {
+    "count": 8,
+    "avg_grounding": 0.878,
+    "avg_groundedness": 8.52,
+    "avg_completeness": 8.3,
+    "avg_structure": 8.71,
+    "avg_overall": 8.51
+  },
+  "delta_grounding": 0.175,
+  "delta_overall": 1.52,
+  "has_data": true,
+  "message": "Pattern learning improved overall judge score by +1.52 points (6.99 \u2192 8.51) across 8 pattern-assisted drafts vs 10 baseline drafts."
+}

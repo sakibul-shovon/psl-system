@@ -50,10 +50,35 @@ if "last_document_id" not in st.session_state:
 
 
 def fetch_documents() -> list[dict]:
-    """Get all documents from the DB via the chunks endpoint heuristic."""
-    # There's no GET /documents endpoint, so we pull from /metrics counts
-    # and let the user paste a document_id, OR we cache uploaded ones.
+    """
+    Get all ingested documents from the API. Falls back to session_state if
+    the API is unreachable (e.g., backend not running yet).
+
+    Returns list of dicts with keys: document_id, title, document_type, page_count.
+    """
+    data, err = api("GET", "/documents")
+    if data and data.get("documents"):
+        return data["documents"]
+    # Fallback to whatever was uploaded in this browser session
     return st.session_state.get("uploaded_docs", [])
+
+
+def document_picker(label: str = "Document") -> str:
+    """
+    Render a selectbox of all known documents. Returns the chosen document_id,
+    or empty string if none exist yet.
+    """
+    docs = fetch_documents()
+    if not docs:
+        st.info("No documents found. Upload one first on the Upload page.")
+        return ""
+    labels = [f"{d['title']}  ({d.get('document_type', '?')})" for d in docs]
+    ids = [d["document_id"] for d in docs]
+    # Default to last-used doc if it still exists, otherwise first in list
+    last = st.session_state.get("last_document_id", "")
+    default_idx = ids.index(last) if last in ids else 0
+    choice = st.selectbox(label, labels, index=default_idx)
+    return ids[labels.index(choice)]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -134,11 +159,7 @@ elif page == "Query":
     st.title("Query Evidence")
     st.caption("Hybrid retrieval: BM25 + dense vectors + cross-encoder rerank → top-5 evidence")
 
-    doc_id = st.text_input(
-        "Document ID",
-        value=st.session_state.get("last_document_id", ""),
-        placeholder="Paste document_id from Upload page",
-    )
+    doc_id = document_picker("Document")
     query = st.text_input("Query", placeholder="What are the termination and compensation terms?")
 
     if st.button("Search", type="primary") and doc_id and query:
@@ -168,11 +189,7 @@ elif page == "Draft":
     st.title("Generate Draft")
     st.caption("Retrieve evidence → inject learned patterns → Gemini generates → NLI grounding check → judge score")
 
-    doc_id = st.text_input(
-        "Document ID",
-        value=st.session_state.get("last_document_id", ""),
-        placeholder="Paste document_id from Upload page",
-    )
+    doc_id = document_picker("Document")
     query = st.text_input(
         "Query",
         placeholder="Summarize the compensation and termination terms",

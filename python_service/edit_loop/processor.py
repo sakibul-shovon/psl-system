@@ -17,6 +17,7 @@ Flow:
 import json
 import logging
 import uuid
+from datetime import datetime
 
 from sqlmodel import Session
 
@@ -30,10 +31,17 @@ from python_service.vector.qdrant_store import qdrant_store
 
 logger = logging.getLogger(__name__)
 
+# Cosine-similarity threshold for treating a candidate pattern as a duplicate of
+# an existing one. Above this, we REINFORCE the existing pattern (++frequency,
+# refresh timestamp, etc.) instead of inserting a new row. This is what makes
+# the edit loop a learning system rather than a logging system.
+DEDUP_THRESHOLD = 0.85
+
 
 def process_edit(edit_id: str) -> None:
     """
-    Run the full classify → extract → store pipeline for one edit.
+    Run the full classify → extract → quality-gate → (reinforce|insert) → mark
+    pipeline for one edit.
 
     This function is safe to call in a FastAPI BackgroundTask — all
     exceptions are caught and logged; the edit row is always updated
@@ -48,6 +56,7 @@ def process_edit(edit_id: str) -> None:
         edited = edit.edited_text
         document_type = edit.document_type
         draft_type = edit.draft_type
+        operator_id = edit.operator_id
 
     try:
         # ── Step 1: Classify ─────────────────────────────────────────────────
@@ -75,9 +84,9 @@ def process_edit(edit_id: str) -> None:
             logger.info("Edit %s failed quality gate: %s", edit_id, reason)
             return
 
-        # ── Step 4: Save pattern to SQLite ───────────────────────────────────
-        # Capture plain values from pattern_dict now — after session closes,
-        # SQLAlchemy detaches the ORM object and attribute access raises DetachedInstanceError.
+        # ── Step 4: Capture pattern values ───────────────────────────────────
+        # Pull all needed values out of pattern_dict now — once SQLAlchemy
+        # session closes, ORM objects detach and attribute access raises.
         rule_type = pattern_dict.get("rule_type", edit_type.lower())
         description = pattern_dict["description"]
         few_shot_before = pattern_dict.get("few_shot_before", "")
@@ -87,10 +96,84 @@ def process_edit(edit_id: str) -> None:
         applicable_draft_types_list = pattern_dict.get("applicable_draft_types", [draft_type])
         applicable_section_types = pattern_dict.get("applicable_section_types", [])
 
+        # ── Step 4.5: Dedup-by-similarity — REINFORCE if existing pattern ───
+        # Embed the candidate description once; reuse the vector below for the
+        # new-insert path if dedup misses (saves one embedding call either way).
+        try:
+            candidate_vec = embed_one(description)
+            similar_hits = qdrant_store.search_similar_patterns(
+                query_vector=candidate_vec,
+                limit=5,
+                active_only=True,
+            )
+        except Exception as exc:
+            logger.warning("Qdrant similarity search failed (treating as new insert): %s", exc)
+            candidate_vec = None
+            similar_hits = []
+
+        existing_hit = next(
+            (h for h in similar_hits if h.get("score", 0.0) >= DEDUP_THRESHOLD),
+            None,
+        )
+
+        if existing_hit:
+            existing_pattern_id = existing_hit["payload"].get("pattern_id")
+            existing_point_id = existing_hit["payload"].get("qdrant_point_id")
+            new_freq = None
+            new_conf = None
+
+            with Session(engine) as session:
+                p = session.get(Pattern, existing_pattern_id)
+                if p is not None:
+                    # Increment usage counters
+                    p.frequency += 1
+                    p.last_reinforced_at = datetime.utcnow()
+
+                    # Append this edit to source_edit_ids (deduped)
+                    source_ids = json.loads(p.source_edit_ids_json or "[]")
+                    if edit_id not in source_ids:
+                        source_ids.append(edit_id)
+                        p.source_edit_ids_json = json.dumps(source_ids)
+
+                    # Track unique operators who reinforced; consensus =
+                    # unique_operators / total_reinforcements. A pattern with
+                    # consensus 1.0 means every operator agrees; lower means
+                    # one operator is insisting on something others don't.
+                    op_ids = set(json.loads(p.operator_ids_json or "[]"))
+                    op_ids.add(operator_id)
+                    p.operator_ids_json = json.dumps(sorted(op_ids))
+                    p.operator_consensus = round(len(op_ids) / max(p.frequency, 1), 3)
+
+                    # Small confidence bump on reinforcement, capped at 0.99
+                    p.confidence = round(min(0.99, p.confidence + 0.05), 3)
+
+                    session.add(p)
+                    session.commit()
+
+                    new_freq = p.frequency
+                    new_conf = p.confidence
+
+            # Push the fresh frequency/confidence into the Qdrant payload so
+            # downstream retrieval composite-weighting sees the update.
+            if existing_point_id and new_freq is not None:
+                try:
+                    qdrant_store.update_pattern_payload(
+                        existing_point_id,
+                        {"frequency": new_freq, "confidence": new_conf},
+                    )
+                except Exception as exc:
+                    logger.warning("Qdrant payload update failed: %s", exc)
+
+            _mark_edit(edit_id, "extracted", classification, pattern_id=existing_pattern_id)
+            logger.info(
+                "Edit %s REINFORCED existing pattern %s (frequency now %s, conf %s)",
+                edit_id, existing_pattern_id, new_freq, new_conf,
+            )
+            return
+
+        # ── Step 5: No match — insert NEW pattern ────────────────────────────
         pattern_id = str(uuid.uuid4())
         with Session(engine) as session:
-            stored_edit = session.get(Edit, edit_id)
-            operator_id = stored_edit.operator_id if stored_edit else "op_harvey"
             pattern_row = Pattern(
                 pattern_id=pattern_id,
                 source_edit_ids_json=json.dumps([edit_id]),
@@ -110,9 +193,10 @@ def process_edit(edit_id: str) -> None:
             session.add(pattern_row)
             session.commit()
 
-        # ── Step 5: Embed description → upsert to Qdrant ─────────────────────
+        # ── Step 6: Embed description → upsert to Qdrant ─────────────────────
+        # Re-embed only if Step 4.5's vector was lost to a Qdrant failure.
         try:
-            vector = embed_one(description)
+            vector = candidate_vec if candidate_vec is not None else embed_one(description)
             qdrant_point_id = qdrant_store.upsert_pattern(
                 pattern_id=pattern_id,
                 principle_vector=vector,
@@ -123,6 +207,7 @@ def process_edit(edit_id: str) -> None:
                     "few_shot_before": few_shot_before,
                     "few_shot_after": few_shot_after,
                     "confidence": confidence,
+                    "frequency": 1,
                     "is_active": True,
                     "document_types": applicable_doc_types,
                     "draft_types": applicable_draft_types_list,
@@ -137,10 +222,10 @@ def process_edit(edit_id: str) -> None:
         except Exception as exc:
             logger.warning("Qdrant upsert failed for pattern %s: %s", pattern_id, exc)
 
-        # ── Step 6: Mark edit as extracted ───────────────────────────────────
+        # ── Step 7: Mark edit as extracted ───────────────────────────────────
         _mark_edit(edit_id, "extracted", classification, pattern_id=pattern_id)
         logger.info(
-            "Edit %s → pattern %s stored [%s]: %s",
+            "Edit %s → NEW pattern %s stored [%s]: %s",
             edit_id, pattern_id, rule_type, description[:60],
         )
 

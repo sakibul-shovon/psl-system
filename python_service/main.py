@@ -33,6 +33,7 @@ from python_service.edit_loop.processor import process_edit
 from python_service.edit_loop.pattern_retriever import retrieve_patterns
 from python_service.evaluation.adherence_checker import check_adherence
 from python_service.evaluation.improvement_validator import compute_improvement_report
+from python_service.tracing import TraceBuilder
 
 logging.basicConfig(
     level=logging.INFO,
@@ -187,6 +188,38 @@ async def get_job(job_id: str):
     }
 
 
+@app.get("/documents")
+async def list_documents(limit: int = 100):
+    """
+    List all ingested documents, newest first.
+
+    Used by the UI to populate document-selection dropdowns so users don't have
+    to copy-paste UUIDs. Stores survive across browser refreshes because they
+    live in SQLite, not session_state.
+    """
+    from sqlmodel import select
+    with Session(engine) as session:
+        docs = session.exec(
+            select(Document)
+            .order_by(Document.uploaded_at.desc())
+            .limit(limit)
+        ).all()
+
+    return {
+        "count": len(docs),
+        "documents": [
+            {
+                "document_id": d.document_id,
+                "title": d.title,
+                "document_type": d.document_type,
+                "page_count": d.page_count,
+                "uploaded_at": d.uploaded_at.isoformat(),
+            }
+            for d in docs
+        ],
+    }
+
+
 @app.get("/documents/{document_id}/chunks")
 async def get_chunks(document_id: str):
     """
@@ -294,58 +327,67 @@ async def generate_document_draft(body: dict):
     if not query:
         raise HTTPException(status_code=400, detail="'query' is required")
 
-    # ── Step 1: Retrieve evidence ────────────────────────────────────────────
     with Session(engine) as session:
         doc = session.get(Document, document_id)
     if not doc:
         raise HTTPException(status_code=404, detail=f"Document {document_id!r} not found")
 
-    retrieval_result = retrieve(query, document_id)
-    if not retrieval_result.sufficient:
-        return {
-            "status": "INSUFFICIENT_EVIDENCE",
-            "diagnostic": retrieval_result.diagnostic,
-        }
+    trace = TraceBuilder("generate_draft", document_id=document_id)
 
-    evidence_items = package_evidence(retrieval_result.evidence, document_title=doc.title)
-    evidence_dicts = [e.to_dict() for e in evidence_items]
+    # ── Step 1: Retrieve evidence ────────────────────────────────────────────
+    with trace.stage("retrieval", method="dense+bm25+rerank"):
+        retrieval_result = retrieve(query, document_id)
+        if not retrieval_result.sufficient:
+            return {
+                "status": "INSUFFICIENT_EVIDENCE",
+                "diagnostic": retrieval_result.diagnostic,
+            }
+        evidence_items = package_evidence(retrieval_result.evidence, document_title=doc.title)
+        evidence_dicts = [e.to_dict() for e in evidence_items]
 
     # ── Step 2: Fetch learned patterns for this query ────────────────────────
-    patterns = retrieve_patterns(
-        query=query,
-        document_type=getattr(doc, "document_type", "unknown"),
-        draft_type=draft_type,
-    )
+    with trace.stage("pattern_retrieval"):
+        patterns = retrieve_patterns(
+            query=query,
+            document_type=getattr(doc, "document_type", "unknown"),
+            draft_type=draft_type,
+        )
 
     # ── Step 3: Build prompt + generate draft ────────────────────────────────
-    prompt = build_prompt(
-        evidence_items=evidence_items,
-        draft_type=draft_type,
-        document_title=doc.title,
-        patterns=patterns or None,
-    )
-    raw_draft = generate_draft(prompt)
-    sections = raw_draft.get("sections", [])
+    with trace.stage("generation", model="gemini-2.5-flash", patterns_injected=len(patterns)):
+        prompt = build_prompt(
+            evidence_items=evidence_items,
+            draft_type=draft_type,
+            document_title=doc.title,
+            patterns=patterns or None,
+        )
+        raw_draft = generate_draft(prompt)
+        sections = raw_draft.get("sections", [])
 
     # ── Step 4: Grounding verification ──────────────────────────────────────
-    evidence_map = {e.evidence_id: e.content for e in evidence_items}
-    grounding = verify_draft(sections, evidence_map)
+    with trace.stage("grounding", model="nli-deberta-v3-small"):
+        evidence_map = {e.evidence_id: e.content for e in evidence_items}
+        grounding = verify_draft(sections, evidence_map)
 
     if grounding.status == "LOW":
+        trace.save()
         return {
             "status": "INSUFFICIENT_GROUNDING",
             "grounding_score": grounding.grounding_score,
             "diagnostic": grounding.diagnostic,
             "warnings": [w.warning_type + ": " + w.sentence[:100] for w in grounding.warnings],
+            "trace_id": trace.trace_id,
         }
 
     # ── Step 5: Adherence check — did Gemini follow injected patterns? ───────
-    adherence = check_adherence(sections, patterns)
+    with trace.stage("adherence_check"):
+        adherence = check_adherence(sections, patterns)
 
     # ── Step 6: Judge score ──────────────────────────────────────────────────
-    judge_scores = judge_draft(sections, evidence_dicts)
+    with trace.stage("judge", model="llama-3.3-70b-versatile"):
+        judge_scores = judge_draft(sections, evidence_dicts)
 
-    # ── Step 7: Save to SQLite ───────────────────────────────────────────────
+    # ── Step 7: Save draft + trace to SQLite ─────────────────────────────────
     draft_id = str(uuid.uuid4())
     applied_pattern_ids = [p["pattern_id"] for p in patterns]
     with Session(engine) as session:
@@ -369,10 +411,15 @@ async def generate_document_draft(body: dict):
                 "evidenceIds": [e.evidence_id for e in evidence_items],
                 "patternsApplied": len(patterns),
                 "adherenceScore": adherence["adherence_score"],
+                "documentType": getattr(doc, "document_type", "unknown"),
+                "draftType": draft_type,
+                "traceId": trace.trace_id,
             }),
         )
         session.add(draft_row)
         session.commit()
+
+    trace.save(draft_id=draft_id)
 
     return {
         "status": "ok",
@@ -392,6 +439,7 @@ async def generate_document_draft(body: dict):
         "adherence_detail": adherence["detail"],
         "judge_scores": judge_scores,
         "evidence_used": [e.evidence_id for e in evidence_items],
+        "trace_id": trace.trace_id,
     }
 
 
@@ -571,4 +619,67 @@ async def improvement_report():
             "grounding_score": report.delta_grounding,
             "overall_judge_score": report.delta_overall,
         },
+    }
+
+
+# ── Trace audit endpoints ──────────────────────────────────────────────────────
+
+@app.get("/traces")
+async def list_traces(limit: int = 50):
+    """
+    List recent pipeline traces, newest first.
+
+    Each trace corresponds to one POST /draft call and records per-stage
+    timing and model information. Use GET /traces/{trace_id} for full detail.
+    """
+    from python_service.db.models import Trace
+    from sqlmodel import select as _select
+
+    with Session(engine) as session:
+        rows = session.exec(
+            _select(Trace).order_by(Trace.created_at.desc()).limit(limit)
+        ).all()
+
+    return {
+        "count": len(rows),
+        "traces": [
+            {
+                "trace_id":          r.trace_id,
+                "request_type":      r.request_type,
+                "document_id":       r.document_id,
+                "draft_id":          r.draft_id,
+                "total_duration_ms": r.total_duration_ms,
+                "created_at":        r.created_at.isoformat(),
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.get("/traces/{trace_id}")
+async def get_trace(trace_id: str):
+    """
+    Full audit record for a single pipeline run.
+
+    Returns per-stage breakdown: stage name, model, duration (ms), and
+    any metadata captured at run time (evidence count, patterns injected, etc.).
+    """
+    import json as _json
+    from python_service.db.models import Trace
+
+    with Session(engine) as session:
+        row = session.get(Trace, trace_id)
+
+    if not row:
+        raise HTTPException(status_code=404, detail=f"Trace {trace_id!r} not found")
+
+    return {
+        "trace_id":          row.trace_id,
+        "request_type":      row.request_type,
+        "document_id":       row.document_id,
+        "draft_id":          row.draft_id,
+        "created_at":        row.created_at.isoformat(),
+        "completed_at":      row.completed_at.isoformat() if row.completed_at else None,
+        "total_duration_ms": row.total_duration_ms,
+        "stages":            _json.loads(row.stages_json or "[]"),
     }
