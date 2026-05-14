@@ -23,15 +23,9 @@ from python_service import jobs as job_store
 from python_service.ingestion.pipeline import run_ingestion_pipeline
 from python_service.retrieval.hybrid import retrieve
 from python_service.retrieval.evidence import package_evidence
-from python_service.generation.context import build_prompt
-from python_service.generation.gemini import generate_draft
-from python_service.generation.grounding import verify_draft
-from python_service.evaluation.draft_judge import judge_draft
 from python_service.db.models import Draft
 from python_service.edit_loop.capture import store_edits
 from python_service.edit_loop.processor import process_edit
-from python_service.edit_loop.pattern_retriever import retrieve_patterns
-from python_service.evaluation.adherence_checker import check_adherence
 from python_service.evaluation.improvement_validator import compute_improvement_report
 from python_service.tracing import TraceBuilder
 
@@ -304,8 +298,8 @@ async def query_document(body: dict):
 @app.post("/draft")
 async def generate_document_draft(body: dict):
     """
-    Full generation pipeline: retrieve evidence → build prompt → Gemini draft
-    → NLI grounding check → judge score → save to SQLite.
+    Agentic draft pipeline (Phase B): planner → parallel executors → critic
+    → refiner loop (max 3) → assembler.
 
     Body: {
       "document_id": "...",
@@ -313,133 +307,88 @@ async def generate_document_draft(body: dict):
       "draft_type": "case_fact_summary"   (optional, default: case_fact_summary)
     }
 
-    Returns the full draft with inline [E1] citations, grounding score,
-    and independent judge scores. Refuses to deliver if grounding < 0.50.
+    Returns the same JSON schema as Phase A so the UI and feedback loop are
+    unaffected. Internally the pipeline is now a LangGraph StateGraph with
+    per-section focused retrieval, parallel generation, and critic-gated
+    refinement.
     """
-    import json as _json
+    from python_service.agent.graph import run_agent
 
     document_id = body.get("document_id")
-    query = body.get("query", "").strip()
-    draft_type = body.get("draft_type", "case_fact_summary")
+    query       = body.get("query", "").strip()
+    draft_type  = body.get("draft_type", "case_fact_summary")
 
     if not document_id:
         raise HTTPException(status_code=400, detail="'document_id' is required")
     if not query:
         raise HTTPException(status_code=400, detail="'query' is required")
 
+    # Validate document exists before handing off to the agent.
     with Session(engine) as session:
         doc = session.get(Document, document_id)
     if not doc:
         raise HTTPException(status_code=404, detail=f"Document {document_id!r} not found")
 
+    # ── Run the agent ─────────────────────────────────────────────────────────
+    # run_agent() is synchronous (LangGraph .invoke()). It runs the full graph
+    # — planner, executors, critic, optional refiner, assembler — and returns
+    # the final DraftingState.
     trace = TraceBuilder("generate_draft", document_id=document_id)
+    try:
+        with trace.stage("agent_graph", model="gemini-2.5-flash+nli-deberta+llama-3.3-70b"):
+            state = run_agent(document_id, query, draft_type)
+    except Exception as exc:
+        logger.error("Agent run failed for document %r: %s", document_id, exc)
+        raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
 
-    # ── Step 1: Retrieve evidence ────────────────────────────────────────────
-    with trace.stage("retrieval", method="dense+bm25+rerank"):
-        retrieval_result = retrieve(query, document_id)
-        if not retrieval_result.sufficient:
-            return {
-                "status": "INSUFFICIENT_EVIDENCE",
-                "diagnostic": retrieval_result.diagnostic,
-            }
-        evidence_items = package_evidence(retrieval_result.evidence, document_title=doc.title)
-        evidence_dicts = [e.to_dict() for e in evidence_items]
-
-    # ── Step 2: Fetch learned patterns for this query ────────────────────────
-    with trace.stage("pattern_retrieval"):
-        patterns = retrieve_patterns(
-            query=query,
-            document_type=getattr(doc, "document_type", "unknown"),
-            draft_type=draft_type,
+    # ── Guard: assembler must have saved a draft ──────────────────────────────
+    if not state.get("final_draft_id"):
+        raise HTTPException(
+            status_code=500,
+            detail="Agent completed but produced no draft. Check server logs.",
         )
 
-    # ── Step 3: Build prompt + generate draft ────────────────────────────────
-    with trace.stage("generation", model="gemini-2.5-flash", patterns_injected=len(patterns)):
-        prompt = build_prompt(
-            evidence_items=evidence_items,
-            draft_type=draft_type,
-            document_title=doc.title,
-            patterns=patterns or None,
-        )
-        raw_draft = generate_draft(prompt)
-        sections = raw_draft.get("sections", [])
+    trace.save(draft_id=state["final_draft_id"])
 
-    # ── Step 4: Grounding verification ──────────────────────────────────────
-    with trace.stage("grounding", model="nli-deberta-v3-small"):
-        evidence_map = {e.evidence_id: e.content for e in evidence_items}
-        grounding = verify_draft(sections, evidence_map)
+    # ── Map agent state → HTTP response ──────────────────────────────────────
+    # Derive grounding_status from the numeric score — same thresholds as Phase A.
+    grounding_score = state.get("final_grounding_score", 0.0)
+    if grounding_score >= 0.75:
+        grounding_status = "HIGH"
+    elif grounding_score >= 0.50:
+        grounding_status = "MEDIUM"
+    else:
+        grounding_status = "LOW"
 
-    if grounding.status == "LOW":
-        trace.save()
-        return {
-            "status": "INSUFFICIENT_GROUNDING",
-            "grounding_score": grounding.grounding_score,
-            "diagnostic": grounding.diagnostic,
-            "warnings": [w.warning_type + ": " + w.sentence[:100] for w in grounding.warnings],
-            "trace_id": trace.trace_id,
-        }
+    adherence    = state.get("final_adherence", {})
+    judge_scores = state.get("final_judge_scores", {})
+    sections     = state.get("final_sections", [])
+    patterns     = state.get("patterns", [])
 
-    # ── Step 5: Adherence check — did Gemini follow injected patterns? ───────
-    with trace.stage("adherence_check"):
-        adherence = check_adherence(sections, patterns)
-
-    # ── Step 6: Judge score ──────────────────────────────────────────────────
-    with trace.stage("judge", model="llama-3.3-70b-versatile"):
-        judge_scores = judge_draft(sections, evidence_dicts)
-
-    # ── Step 7: Save draft + trace to SQLite ─────────────────────────────────
-    draft_id = str(uuid.uuid4())
-    applied_pattern_ids = [p["pattern_id"] for p in patterns]
-    with Session(engine) as session:
-        draft_row = Draft(
-            draft_id=draft_id,
-            document_id=document_id,
-            draft_type=draft_type,
-            title=raw_draft.get("title", query),
-            sections_json=_json.dumps(sections),
-            grounding_score=grounding.grounding_score,
-            warnings_json=_json.dumps([
-                {"type": w.warning_type, "sentence": w.sentence, "evidence_id": w.evidence_id}
-                for w in grounding.warnings
-            ]),
-            judge_scores_json=_json.dumps(judge_scores),
-            applied_pattern_ids_json=_json.dumps(applied_pattern_ids),
-            processing_meta_json=_json.dumps({
-                "generationModel": "gemini-2.5-flash",
-                "judgeModel": "llama-3.3-70b-versatile",
-                "retrievalMethod": retrieval_result.retrieval_method,
-                "evidenceIds": [e.evidence_id for e in evidence_items],
-                "patternsApplied": len(patterns),
-                "adherenceScore": adherence["adherence_score"],
-                "documentType": getattr(doc, "document_type", "unknown"),
-                "draftType": draft_type,
-                "traceId": trace.trace_id,
-            }),
-        )
-        session.add(draft_row)
-        session.commit()
-
-    trace.save(draft_id=draft_id)
+    # Collect all evidence IDs cited across sections
+    evidence_used = sorted({
+        eid
+        for sec in sections
+        for eid in sec.get("evidence_ids", [])
+    })
 
     return {
-        "status": "ok",
-        "draft_id": draft_id,
-        "document_id": document_id,
-        "draft_type": draft_type,
-        "title": raw_draft.get("title", ""),
-        "sections": sections,
-        "grounding_score": grounding.grounding_score,
-        "grounding_status": grounding.status,
-        "warnings": [
-            {"type": w.warning_type, "sentence": w.sentence[:120]}
-            for w in grounding.warnings
-        ],
+        "status":           "ok",
+        "draft_id":         state["final_draft_id"],
+        "document_id":      document_id,
+        "draft_type":       draft_type,
+        "title":            state.get("final_title", query),
+        "sections":         sections,
+        "grounding_score":  grounding_score,
+        "grounding_status": grounding_status,
+        "warnings":         [],          # per-section grounding captured in each section's confidence field
         "patterns_applied": len(patterns),
-        "adherence_score": adherence["adherence_score"],
-        "adherence_detail": adherence["detail"],
-        "judge_scores": judge_scores,
-        "evidence_used": [e.evidence_id for e in evidence_items],
-        "trace_id": trace.trace_id,
+        "adherence_score":  adherence.get("adherence_score", 0.0),
+        "adherence_detail": adherence.get("detail", []),
+        "judge_scores":     judge_scores,
+        "evidence_used":    evidence_used,
+        "agent_iterations": state.get("iteration", 0),
+        "trace_id":         trace.trace_id,
     }
 
 

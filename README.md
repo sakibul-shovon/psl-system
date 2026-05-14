@@ -92,12 +92,22 @@ flowchart TD
     STORE_B --> BM25
     DENSE & BM25 --> RRF --> RERANK
 
-    RERANK --> PROMPT
-    PAT_STORE --> PATS --> PROMPT
-    PROMPT --> GEM --> NLI --> JUDGE
-    NLI & JUDGE --> TRACE
+    RERANK --> EXEC
+    PAT_STORE --> PATS
 
-    JUDGE --> EDIT --> CLASS --> EXTRACT --> DEDUP --> PAT_STORE
+    subgraph AGENT["Pillar 3 — Agentic Draft (LangGraph)"]
+        PLAN["Planner\nGemini: decompose query\ninto 4–7 section plans"]
+        EXEC["Executors × N\nper-section retrieval\n+ Gemini generation\n+ NLI grounding\n(parallel)"]
+        CRIT["Critic\ncheck grounding score\ncompleteness + style"]
+        REF["Refiner\nimprove retrieval query\nfor weak sections"]
+        ASM["Assembler\naverage grounding\nGroq judge + save"]
+    end
+
+    PATS --> PLAN --> EXEC --> CRIT
+    CRIT -- "weak sections, iter < 3" --> REF --> EXEC
+    CRIT -- "all pass or max iter" --> ASM --> TRACE
+
+    ASM --> EDIT --> CLASS --> EXTRACT --> DEDUP --> PAT_STORE
 ```
 
 ---
@@ -210,7 +220,7 @@ Open http://localhost:8501 in your browser.
 | GET | `/documents` | List all ingested documents (used by UI dropdowns) |
 | GET | `/documents/{id}/chunks` | List extracted chunks for a document |
 | POST | `/query` | Hybrid evidence retrieval (BM25 + dense + rerank) |
-| POST | `/draft` | Generate grounded draft with citations |
+| POST | `/draft` | Agentic draft: planner → parallel executors → critic loop → assembler |
 | POST | `/feedback` | Submit operator edits → triggers pattern extraction |
 | GET | `/patterns` | List all learned patterns |
 | GET | `/metrics` | System-wide counts and average scores |
