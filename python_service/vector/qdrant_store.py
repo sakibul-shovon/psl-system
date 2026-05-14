@@ -30,6 +30,7 @@ EMBEDDING_DIM = 768   # BAAI/bge-base-en-v1.5 output dimension
 
 CHUNKS_COLLECTION = "legal_chunks"
 PATTERNS_COLLECTION = "learned_patterns"
+EPISODIC_COLLECTION = "episodic_memory"
 
 
 class QdrantStore:
@@ -51,6 +52,7 @@ class QdrantStore:
         """
         self._ensure_chunks_collection()
         self._ensure_patterns_collection()
+        self._ensure_episodic_collection()
 
     def _ensure_chunks_collection(self) -> None:
         existing = {c.name for c in self.client.get_collections().collections}
@@ -117,6 +119,36 @@ class QdrantStore:
             )
 
         logger.info("Created collection '%s'", PATTERNS_COLLECTION)
+
+    def _ensure_episodic_collection(self) -> None:
+        existing = {c.name for c in self.client.get_collections().collections}
+        if EPISODIC_COLLECTION in existing:
+            logger.info("Collection '%s' already exists", EPISODIC_COLLECTION)
+            return
+
+        # Each episodic memory is embedded as "query | document_type" (768-dim).
+        # At retrieval time we search by the new draft's query+doc_type to find
+        # the most similar past sessions — essentially "how did I handle this before?"
+        self.client.create_collection(
+            collection_name=EPISODIC_COLLECTION,
+            vectors_config=qmodels.VectorParams(
+                size=EMBEDDING_DIM,
+                distance=qmodels.Distance.COSINE,
+            ),
+        )
+
+        for field, schema_type in [
+            ("memory_id", qmodels.PayloadSchemaType.KEYWORD),
+            ("document_type", qmodels.PayloadSchemaType.KEYWORD),
+            ("draft_type", qmodels.PayloadSchemaType.KEYWORD),
+        ]:
+            self.client.create_payload_index(
+                collection_name=EPISODIC_COLLECTION,
+                field_name=field,
+                field_schema=schema_type,
+            )
+
+        logger.info("Created collection '%s'", EPISODIC_COLLECTION)
 
     # ── Chunk operations ────────────────────────────────────────────────────
 
@@ -296,6 +328,61 @@ class QdrantStore:
             ),
         )
         logger.info("Deleted chunk vectors for document %s", document_id)
+
+    # ── Episodic memory operations ──────────────────────────────────────────
+
+    def upsert_episodic_memory(
+        self,
+        *,
+        memory_id: str,
+        query_vector: list[float],
+        payload: dict[str, Any],
+    ) -> str:
+        """
+        Store an episodic memory point.
+
+        The vector is the embedding of "query | document_type". At retrieval
+        time we search by the same embedding of the new draft's context, so
+        the planner gets examples of how similar queries played out before.
+        """
+        point_id = str(uuid4())
+        payload["qdrant_point_id"] = point_id
+        payload["memory_id"] = memory_id
+
+        self.client.upsert(
+            collection_name=EPISODIC_COLLECTION,
+            points=[
+                qmodels.PointStruct(
+                    id=point_id,
+                    vector=query_vector,
+                    payload=payload,
+                )
+            ],
+        )
+        return point_id
+
+    def search_episodic_memories(
+        self,
+        *,
+        query_vector: list[float],
+        limit: int = 3,
+    ) -> list[dict[str, Any]]:
+        """
+        Find the top-k most similar past draft sessions.
+
+        Returns dicts with keys: memory_id, score, payload.
+        Used by the planner to inject prior-session context into its prompt.
+        """
+        results = self.client.search(
+            collection_name=EPISODIC_COLLECTION,
+            query_vector=query_vector,
+            limit=limit,
+            with_payload=True,
+        )
+        return [
+            {"memory_id": r.payload.get("memory_id"), "score": r.score, "payload": r.payload}
+            for r in results
+        ]
 
 
 # Module-level singleton — import this everywhere.

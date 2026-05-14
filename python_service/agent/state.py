@@ -119,6 +119,11 @@ class DraftingState(TypedDict, total=False):
     # ── Patterns (retrieved once, shared across all executors) ────────────────
     patterns: list[dict]
 
+    # ── A/B test control flag ─────────────────────────────────────────────────
+    # When True, the planner skips pattern retrieval so this draft enters the
+    # "control" group (no patterns applied). Used by scripts/ab_test.py.
+    skip_patterns: bool
+
     # ── Executor private slot ─────────────────────────────────────────────────
     # Set by the dispatcher via Send() — each executor sees its own section here.
     # Never written to directly; always comes from the fan-out dispatch.

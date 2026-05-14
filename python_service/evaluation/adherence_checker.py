@@ -1,25 +1,31 @@
 """
-Adherence checker — verifies Gemini followed the injected style patterns.
+Adherence checker — verifies the draft followed the injected style patterns.
 
-After generation, scans the draft text for the few_shot_before phrase from
-each injected pattern.  If the "wrong" phrasing still appears in the draft,
-the model ignored the rule.
+Phase C upgrade: uses NLI (DeBERTa) instead of substring search.
 
-Why substring search instead of NLI?
-  Pattern rules are specific word-choice rules ("use X not Y").  The
-  few_shot_before is the exact wrong phrase to avoid.  Substring search
-  is fast, deterministic, and correct for this narrow task.  NLI would
-  add 200ms of model inference for a problem that string matching solves
-  perfectly.
+WHY upgrade from substring to NLI?
+  The old checker asked: "does the wrong phrase appear in the draft?"
+  That catches 'salary' but misses 'annual earnings' or 'total remuneration'.
+  NLI asks: "does the draft TEXT ENTAIL this rule?"  The model understands
+  that 'Base Compensation' and 'annual earnings' express the same concept
+  and can flag violations regardless of phrasing.
+
+  For NEUTRAL cases (model is unsure), we fall back to substring search so
+  explicit few_shot_before phrases are still caught.
 
 Adherence score = patterns_followed / patterns_injected
-  1.0 = Gemini followed all rules
-  0.0 = Gemini ignored all rules
+  1.0 = draft followed all injected rules
+  0.0 = draft violated all injected rules
 """
 
 import logging
 
 logger = logging.getLogger(__name__)
+
+# NLI context limit: DeBERTa handles ~512 tokens. We truncate the full draft
+# to 4000 characters (roughly 600–800 tokens) to stay safely within the limit
+# while capturing most of the draft.
+_NLI_PREMISE_CHAR_LIMIT = 4000
 
 
 def check_adherence(
@@ -29,14 +35,17 @@ def check_adherence(
     """
     Check whether the draft followed each injected pattern.
 
+    Uses NLI (cross-encoder/nli-deberta-v3-small) to evaluate whether the
+    draft text entails each pattern's rule. Falls back to substring search
+    for NEUTRAL cases where the model is undecided.
+
     Args:
         draft_sections:    list of section dicts from Gemini output.
-        injected_patterns: patterns that were injected into the prompt
-                           (each must have fewShotBefore and description).
+        injected_patterns: patterns that were injected into the prompt.
 
     Returns:
-        Dict with adherence_score (0.0–1.0), followed/violated lists,
-        and per-pattern detail.
+        Dict with adherence_score (0.0–1.0), followed/violated counts,
+        and per-pattern detail including the NLI label.
     """
     if not injected_patterns:
         return {
@@ -48,10 +57,19 @@ def check_adherence(
             "detail": [],
         }
 
-    # Flatten draft to one searchable string (lowercased for case-insensitive match)
-    full_text = " ".join(
-        s.get("content", "") for s in draft_sections
-    ).lower()
+    # Flatten all section content into one string for the NLI premise.
+    # We truncate to stay within the model's token limit.
+    full_text = " ".join(s.get("content", "") for s in draft_sections)
+    premise = full_text[:_NLI_PREMISE_CHAR_LIMIT]
+
+    # Lazy-load the NLI model (it's already cached as a singleton in verifier.py
+    # from grounding verification, so this call is near-zero cost the 2nd time).
+    try:
+        from python_service.nli import verifier as nli
+        nli_available = True
+    except Exception as exc:
+        logger.warning("NLI model unavailable — falling back to substring adherence: %s", exc)
+        nli_available = False
 
     followed = 0
     violated = 0
@@ -59,52 +77,94 @@ def check_adherence(
     detail: list[dict] = []
 
     for pattern in injected_patterns:
+        description   = pattern.get("description", "")
         before_phrase = pattern.get("fewShotBefore", "").strip().lower()
-        description = pattern.get("description", "")
+        pattern_id    = pattern.get("pattern_id")
 
-        if not before_phrase:
-            # Can't check adherence without a before-phrase — count as followed
+        if not description:
             followed += 1
             detail.append({
-                "pattern_id": pattern.get("pattern_id"),
+                "pattern_id":  pattern_id,
                 "description": description,
-                "result": "UNCHECKED",
-                "reason": "no few_shot_before phrase to search for",
+                "result":      "UNCHECKED",
+                "reason":      "no description to check",
             })
             continue
 
-        if before_phrase in full_text:
-            # Wrong phrase still present → model ignored the rule
+        # ── NLI check ────────────────────────────────────────────────────────
+        # We ask: "does this draft (premise) ENTAIL this rule (hypothesis)?"
+        # ENTAILMENT  → draft is consistent with the rule → FOLLOWED
+        # CONTRADICTION → draft contradicts the rule → VIOLATED
+        # NEUTRAL     → model is uncertain → fall back to substring
+        nli_label = "NEUTRAL"
+        if nli_available:
+            try:
+                nli_label = nli.predict(premise=premise, hypothesis=description)
+            except Exception as exc:
+                logger.warning(
+                    "NLI predict failed for pattern %r: %s — using NEUTRAL fallback",
+                    pattern_id, exc,
+                )
+
+        if nli_label == "ENTAILMENT":
+            followed += 1
+            detail.append({
+                "pattern_id":  pattern_id,
+                "description": description,
+                "result":      "FOLLOWED",
+                "nli_label":   nli_label,
+            })
+
+        elif nli_label == "CONTRADICTION":
             violated += 1
             violations.append(description)
             detail.append({
-                "pattern_id": pattern.get("pattern_id"),
+                "pattern_id":  pattern_id,
                 "description": description,
-                "result": "VIOLATED",
-                "found_phrase": pattern.get("fewShotBefore"),
+                "result":      "VIOLATED",
+                "nli_label":   nli_label,
             })
-            logger.info("Pattern VIOLATED — found %r in draft", before_phrase[:50])
+            logger.info("Pattern VIOLATED (NLI CONTRADICTION): %s", description[:60])
+
         else:
-            followed += 1
-            detail.append({
-                "pattern_id": pattern.get("pattern_id"),
-                "description": description,
-                "result": "FOLLOWED",
-            })
+            # NEUTRAL: NLI is unsure. Fall back to substring search.
+            # If the "wrong" before-phrase is present, the rule was likely violated.
+            if before_phrase and before_phrase in full_text.lower():
+                violated += 1
+                violations.append(description)
+                detail.append({
+                    "pattern_id":   pattern_id,
+                    "description":  description,
+                    "result":       "VIOLATED",
+                    "nli_label":    nli_label,
+                    "found_phrase": pattern.get("fewShotBefore"),
+                })
+                logger.info(
+                    "Pattern VIOLATED (NLI NEUTRAL + substring hit): %r in draft",
+                    before_phrase[:50],
+                )
+            else:
+                followed += 1
+                detail.append({
+                    "pattern_id":  pattern_id,
+                    "description": description,
+                    "result":      "FOLLOWED",
+                    "nli_label":   nli_label,
+                })
 
     total = len(injected_patterns)
     score = round(followed / total, 3) if total > 0 else 1.0
 
     logger.info(
-        "Adherence: %d/%d patterns followed → score=%.2f",
+        "Adherence (NLI): %d/%d patterns followed → score=%.2f",
         followed, total, score,
     )
 
     return {
-        "adherence_score": score,
-        "patterns_injected": total,
-        "patterns_followed": followed,
-        "patterns_violated": violated,
-        "violations": violations,
-        "detail": detail,
+        "adherence_score":    score,
+        "patterns_injected":  total,
+        "patterns_followed":  followed,
+        "patterns_violated":  violated,
+        "violations":         violations,
+        "detail":             detail,
     }

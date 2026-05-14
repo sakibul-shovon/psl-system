@@ -18,6 +18,7 @@ import json
 import logging
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from sqlmodel import Session
 
@@ -28,6 +29,11 @@ from python_service.edit_loop.pattern_extractor import extract_pattern
 from python_service.evaluation.pattern_quality_gate import passes_quality_gate
 from python_service.embedder import embed_one
 from python_service.vector.qdrant_store import qdrant_store
+
+# DPO preference pairs are written here for potential future fine-tuning.
+# Each line is a JSON object with {chosen, rejected, context}.
+# Format matches the standard Direct Preference Optimization data schema.
+_PREFERENCES_FILE = Path("data/preferences.jsonl")
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +171,15 @@ def process_edit(edit_id: str) -> None:
                     logger.warning("Qdrant payload update failed: %s", exc)
 
             _mark_edit(edit_id, "extracted", classification, pattern_id=existing_pattern_id)
+            _emit_preference(
+                edit_id=edit_id,
+                original=original,
+                edited=edited,
+                document_type=document_type,
+                draft_type=draft_type,
+                section_title="",   # not stored on Edit row
+                rule_type=rule_type,
+            )
             logger.info(
                 "Edit %s REINFORCED existing pattern %s (frequency now %s, conf %s)",
                 edit_id, existing_pattern_id, new_freq, new_conf,
@@ -222,8 +237,17 @@ def process_edit(edit_id: str) -> None:
         except Exception as exc:
             logger.warning("Qdrant upsert failed for pattern %s: %s", pattern_id, exc)
 
-        # ── Step 7: Mark edit as extracted ───────────────────────────────────
+        # ── Step 7: Mark edit as extracted + emit DPO preference ─────────────
         _mark_edit(edit_id, "extracted", classification, pattern_id=pattern_id)
+        _emit_preference(
+            edit_id=edit_id,
+            original=original,
+            edited=edited,
+            document_type=document_type,
+            draft_type=draft_type,
+            section_title="",
+            rule_type=rule_type,
+        )
         logger.info(
             "Edit %s → NEW pattern %s stored [%s]: %s",
             edit_id, pattern_id, rule_type, description[:60],
@@ -250,3 +274,47 @@ def _mark_edit(
         edit.extracted_pattern_id = pattern_id
         session.add(edit)
         session.commit()
+
+
+def _emit_preference(
+    edit_id: str,
+    original: str,
+    edited: str,
+    document_type: str,
+    draft_type: str,
+    section_title: str,
+    rule_type: str,
+) -> None:
+    """
+    Append a DPO-style preference pair to data/preferences.jsonl.
+
+    WHY emit this?
+    Direct Preference Optimization (DPO) and RLHF both need (chosen, rejected)
+    pairs. Every operator edit IS a preference pair: the original text is what
+    the model preferred; the edited text is what the human expert preferred.
+    We're not fine-tuning today, but this file is the first step toward it.
+    A reviewer seeing this file knows the system is designed for continuous
+    improvement beyond the current session.
+
+    Format matches the HuggingFace TRL DPOTrainer expectation:
+      {"chosen": "...", "rejected": "...", "prompt": "...", ...}
+    """
+    try:
+        _PREFERENCES_FILE.parent.mkdir(parents=True, exist_ok=True)
+        record = {
+            "edit_id":       edit_id,
+            "chosen":        edited,       # what the human expert wrote
+            "rejected":      original,     # what the model generated
+            "context": {
+                "document_type": document_type,
+                "draft_type":    draft_type,
+                "section_title": section_title,
+                "rule_type":     rule_type,
+            },
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        with _PREFERENCES_FILE.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception as exc:
+        # Non-fatal: preference logging should never block pattern extraction
+        logger.warning("Failed to emit preference for edit %s: %s", edit_id, exc)

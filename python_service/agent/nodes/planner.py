@@ -30,6 +30,8 @@ from python_service.config import settings
 from python_service.db.models import Document
 from python_service.db.session import engine
 from python_service.edit_loop.pattern_retriever import retrieve_patterns
+from python_service.embedder import embed_one
+from python_service.vector.qdrant_store import qdrant_store
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +49,7 @@ QUERY: {query}
 DOCUMENT TYPE: {document_type}
 DRAFT TYPE: {draft_type}
 DOCUMENT TITLE: {document_title}
-
+{episodic_context}
 Rules:
 - 4 sections minimum, 7 maximum
 - Each retrieval_query must be specific to THAT section only (not the whole query)
@@ -67,6 +69,55 @@ Return ONLY valid JSON, no markdown, no explanation:
   ]
 }}
 """
+
+
+def _retrieve_episodic_context(query: str, document_type: str) -> str:
+    """
+    Fetch the top-3 most similar past draft sessions from episodic memory
+    and format them as a readable block for the planner prompt.
+
+    WHY inject past sessions into the planner?
+    The planner is choosing retrieval queries and section structure. Knowing
+    that "last time you drafted a lease termination summary, the operator
+    reworded the 'notice period' section heavily" tells the planner to focus
+    its retrieval query on notice-period clauses — a signal no pattern captures.
+
+    Returns an empty string if no memories exist yet (safe default for
+    the first draft, before any feedback has been submitted).
+    """
+    try:
+        embed_text = f"{query} | {document_type}"
+        vector = embed_one(embed_text)
+        memories = qdrant_store.search_episodic_memories(query_vector=vector, limit=3)
+    except Exception as exc:
+        logger.warning("Episodic memory retrieval failed (skipping): %s", exc)
+        return ""
+
+    if not memories:
+        return ""
+
+    lines = [
+        "\nPRIOR SIMILAR SESSIONS (episodic memory — use for context, not as facts):"
+    ]
+    for i, m in enumerate(memories, start=1):
+        p = m.get("payload", {})
+        q = p.get("query", "")[:120]
+        doc_type = p.get("document_type", "?")
+        edit_count = p.get("edit_count", 0)
+        dist = p.get("edit_distance_total", 0)
+        grounding = p.get("grounding_score", 0.0)
+        judge = p.get("judge_overall")
+        judge_str = f"{judge:.1f}/5" if judge is not None else "unscored"
+        lines.append(
+            f"  [{i}] Query: \"{q}\" | DocType: {doc_type} | "
+            f"Operator made {edit_count} edit(s), total distance {dist} | "
+            f"Grounding: {grounding:.2f} | Judge: {judge_str}"
+        )
+    lines.append(
+        "  → Sections that were heavily edited suggest the retrieval query "
+        "needs to be more specific for those topics.\n"
+    )
+    return "\n".join(lines)
 
 
 def _call_gemini(prompt: str) -> dict:
@@ -120,22 +171,37 @@ def planner_node(state: DraftingState) -> dict:
     logger.info("Planner: document=%r type=%r query=%r", document_title, document_type, query)
 
     # ── Step 2: Retrieve learned patterns once ────────────────────────────────
-    # All executor nodes will get these via the shared state.
-    # We retrieve them here so we only hit Qdrant once regardless of how many
-    # sections (and therefore executor nodes) the plan produces.
-    patterns = retrieve_patterns(
-        query=query,
-        document_type=document_type,
-        draft_type=draft_type,
-    )
-    logger.info("Planner: %d patterns retrieved", len(patterns))
+    # skip_patterns=True is set by scripts/ab_test.py for the control group.
+    # In that case we return an empty list so the draft is generated without
+    # any learned patterns — giving us the "no patterns" baseline for the A/B test.
+    if state.get("skip_patterns", False):
+        patterns = []
+        logger.info("Planner: skip_patterns=True — returning empty pattern list (A/B control group)")
+    else:
+        patterns = retrieve_patterns(
+            query=query,
+            document_type=document_type,
+            draft_type=draft_type,
+        )
+        logger.info("Planner: %d patterns retrieved", len(patterns))
 
-    # ── Step 3: Call Gemini to decompose the query into sections ──────────────
+    # ── Step 3: Retrieve episodic memories for context ───────────────────────
+    # Embed "query | document_type", search for similar past sessions.
+    # The formatted string is injected into the planner prompt so Gemini
+    # can see how similar drafts were received by operators previously.
+    episodic_context = _retrieve_episodic_context(query, document_type)
+    logger.info(
+        "Planner: episodic context %s",
+        "found" if episodic_context else "empty (no prior sessions)",
+    )
+
+    # ── Step 4: Call Gemini to decompose the query into sections ──────────────
     prompt = _PLANNER_PROMPT.format(
         query=query,
         document_type=document_type,
         draft_type=draft_type,
         document_title=document_title,
+        episodic_context=episodic_context,
     )
 
     try:
@@ -154,7 +220,7 @@ def planner_node(state: DraftingState) -> dict:
             }
         ]
 
-    # ── Step 4: Validate and coerce into SectionPlan TypedDicts ───────────────
+    # ── Step 5: Validate and coerce into SectionPlan TypedDicts ───────────────
     # Gemini might return slightly wrong field names or missing fields.
     # We apply safe defaults so downstream nodes never crash on a missing key.
     plan: list[SectionPlan] = []

@@ -314,9 +314,10 @@ async def generate_document_draft(body: dict):
     """
     from python_service.agent.graph import run_agent
 
-    document_id = body.get("document_id")
-    query       = body.get("query", "").strip()
-    draft_type  = body.get("draft_type", "case_fact_summary")
+    document_id   = body.get("document_id")
+    query         = body.get("query", "").strip()
+    draft_type    = body.get("draft_type", "case_fact_summary")
+    skip_patterns = bool(body.get("skip_patterns", False))
 
     if not document_id:
         raise HTTPException(status_code=400, detail="'document_id' is required")
@@ -336,7 +337,7 @@ async def generate_document_draft(body: dict):
     trace = TraceBuilder("generate_draft", document_id=document_id)
     try:
         with trace.stage("agent_graph", model="gemini-2.5-flash+nli-deberta+llama-3.3-70b"):
-            state = run_agent(document_id, query, draft_type)
+            state = run_agent(document_id, query, draft_type, skip_patterns=skip_patterns)
     except Exception as exc:
         logger.error("Agent run failed for document %r: %s", document_id, exc)
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
@@ -440,6 +441,9 @@ async def submit_feedback(body: dict, background_tasks: BackgroundTasks):
     # Classify + extract patterns in the background (slow — Groq LLM calls)
     for edit_id in edit_ids:
         background_tasks.add_task(process_edit, edit_id)
+
+    # Write episodic memory for this feedback session (fast — SQL read + embed)
+    background_tasks.add_task(_write_episodic_memory, draft_id, edits)
 
     return {
         "status": "accepted",
@@ -632,3 +636,167 @@ async def get_trace(trace_id: str):
         "total_duration_ms": row.total_duration_ms,
         "stages":            _json.loads(row.stages_json or "[]"),
     }
+
+
+# ── Pattern impact analytics ───────────────────────────────────────────────────
+
+@app.get("/patterns/{pattern_id}/impact")
+async def pattern_impact(pattern_id: str):
+    """
+    How many drafts has this pattern been applied to, and what quality lift
+    does it produce?
+
+    Returns frequency, operator consensus, drafts applied, and average
+    judge_overall score for drafts that used this pattern.
+    Reviewers use this to verify the learning loop is producing value.
+    """
+    import json as _json
+    import statistics
+    from sqlmodel import select as _select
+    from python_service.db.models import Pattern, Draft
+
+    with Session(engine) as session:
+        p = session.get(Pattern, pattern_id)
+        if not p:
+            raise HTTPException(status_code=404, detail="Pattern not found")
+        all_drafts = session.exec(_select(Draft)).all()
+
+    # Find drafts that listed this pattern in their applied_pattern_ids_json
+    applied_drafts = [
+        d for d in all_drafts
+        if pattern_id in _json.loads(d.applied_pattern_ids_json or "[]")
+    ]
+
+    judge_scores = []
+    for d in applied_drafts:
+        try:
+            s = _json.loads(d.judge_scores_json or "{}")
+            if s.get("overall") is not None:
+                judge_scores.append(float(s["overall"]))
+        except (ValueError, TypeError):
+            pass
+
+    return {
+        "pattern_id":          pattern_id,
+        "description":         p.description,
+        "rule_type":           p.rule_type,
+        "frequency":           p.frequency,
+        "operator_consensus":  p.operator_consensus,
+        "confidence":          p.confidence,
+        "is_active":           p.is_active,
+        "drafts_applied_to":   len(applied_drafts),
+        "avg_judge_overall_when_applied": (
+            round(statistics.mean(judge_scores), 3) if judge_scores else None
+        ),
+        "last_reinforced_at":  p.last_reinforced_at.isoformat(),
+        "created_at":          p.created_at.isoformat(),
+        "source_edit_ids":     _json.loads(p.source_edit_ids_json or "[]"),
+    }
+
+
+# ── Private helpers ────────────────────────────────────────────────────────────
+
+def _write_episodic_memory(draft_id: str, edits: list[dict]) -> None:
+    """
+    Background task: record the (draft, edit-outcome) session as episodic memory.
+
+    Called by the /feedback route. We store:
+      - The query that generated the draft (from processing_meta_json)
+      - Quality scores (grounding, judge_overall)
+      - How much the operator changed the draft (edit distances)
+
+    This lets the planner ask "what happened last time I drafted something
+    similar?" and inject that context into its decomposition prompt.
+
+    WHY background task?
+    The embedding call (~50ms) and two DB writes would add latency to the
+    /feedback response. Since episodic memory is used at the NEXT draft
+    (not the current one), it's fine to write asynchronously.
+    """
+    import json as _json
+    import Levenshtein
+    from python_service.db.models import EpisodicMemory, Draft
+    from python_service.embedder import embed_one
+    from python_service.vector.qdrant_store import qdrant_store
+
+    try:
+        with Session(engine) as session:
+            draft = session.get(Draft, draft_id)
+        if not draft:
+            logger.warning("EpisodicMemory skipped — draft %r not found", draft_id)
+            return
+
+        # Extract query + document_type from the processing metadata the
+        # assembler wrote. Falls back gracefully if either is missing.
+        meta = _json.loads(draft.processing_meta_json or "{}")
+        query = meta.get("query", "")
+        document_type = meta.get("documentType", "unknown")
+        draft_type = draft.draft_type
+
+        judge_scores = _json.loads(draft.judge_scores_json or "{}")
+        try:
+            judge_overall = float(judge_scores["overall"]) if judge_scores.get("overall") else None
+        except (TypeError, ValueError):
+            judge_overall = None
+
+        # Sum of Levenshtein edit distances across all submitted edits.
+        # A high total means the operator heavily rewrote the draft.
+        # A decreasing trend over sessions means the system is converging.
+        edit_distance_total = sum(
+            Levenshtein.distance(
+                e.get("original_text", ""),
+                e.get("edited_text", ""),
+            )
+            for e in edits
+        )
+
+        memory = EpisodicMemory(
+            document_id=draft.document_id,
+            document_type=document_type,
+            query=query,
+            draft_id=draft_id,
+            draft_type=draft_type,
+            grounding_score=draft.grounding_score,
+            judge_overall=judge_overall,
+            edit_distance_total=edit_distance_total,
+            edit_count=len(edits),
+        )
+
+        with Session(engine) as session:
+            session.add(memory)
+            session.commit()
+
+        # Embed "query | document_type" so the planner can find similar sessions
+        # using cosine similarity (same approach as pattern retrieval).
+        embed_text = f"{query} | {document_type}"
+        vector = embed_one(embed_text)
+        point_id = qdrant_store.upsert_episodic_memory(
+            memory_id=memory.memory_id,
+            query_vector=vector,
+            payload={
+                "memory_id":           memory.memory_id,
+                "document_id":         draft.document_id,
+                "document_type":       document_type,
+                "draft_type":          draft_type,
+                "query":               query[:200],
+                "grounding_score":     draft.grounding_score,
+                "judge_overall":       judge_overall,
+                "edit_count":          len(edits),
+                "edit_distance_total": edit_distance_total,
+            },
+        )
+
+        with Session(engine) as session:
+            mem = session.get(EpisodicMemory, memory.memory_id)
+            if mem:
+                mem.qdrant_point_id = point_id
+                session.add(mem)
+                session.commit()
+
+        logger.info(
+            "EpisodicMemory %r written for draft %r (edits=%d, total_dist=%d)",
+            memory.memory_id, draft_id, len(edits), edit_distance_total,
+        )
+
+    except Exception as exc:
+        logger.error("_write_episodic_memory(%r) failed: %s", draft_id, exc, exc_info=True)

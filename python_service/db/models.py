@@ -145,3 +145,48 @@ class Trace(SQLModel, table=True):
     created_at: datetime = Field(default_factory=_now)
     completed_at: Optional[datetime] = None
     total_duration_ms: Optional[int] = None
+
+
+# ─── EpisodicMemory ────────────────────────────────────────────────────────────
+# One row per operator feedback session. Captures the (query, document, draft,
+# edit outcome) tuple so the planner can retrieve similar past sessions.
+#
+# "Episodic memory" in cognitive science = memory of specific events, with
+# context. Contrast with Pattern (procedural memory = how to do something).
+# Here: "last time I drafted a lease agreement about termination, the operator
+# changed X to Y and the edit distance was Z."
+
+class EpisodicMemory(SQLModel, table=True):
+    memory_id: str = Field(default_factory=_uuid, primary_key=True)
+    document_id: str = Field(index=True)
+    document_type: str = "unknown"
+    query: str = ""                        # the query that generated the draft
+    draft_id: str = Field(default="", index=True)
+    draft_type: str = "case_fact_summary"
+    grounding_score: float = 0.0
+    judge_overall: Optional[float] = None  # 1–5 judge score, None if not judged
+    edit_distance_total: int = 0           # sum of Levenshtein distances across all edits
+    edit_count: int = 0                    # how many sections were edited
+    qdrant_point_id: Optional[str] = None  # links to episodic_memory Qdrant collection
+    created_at: datetime = Field(default_factory=_now)
+
+
+# ─── PatternVersion ────────────────────────────────────────────────────────────
+# Archives old versions of a pattern when it is corrected. The active pattern
+# row in Pattern stays current; old versions are preserved here for audit.
+#
+# Why archive instead of overwrite?
+# Without versioning, if a pattern was "use X" and later corrected to "use Y",
+# we lose the history. With PatternVersion we can see the pattern evolved,
+# which is evidence the learning loop is working correctly.
+
+class PatternVersion(SQLModel, table=True):
+    version_id: str = Field(default_factory=_uuid, primary_key=True)
+    pattern_id: str = Field(index=True)    # the Pattern row this is a snapshot of
+    description: str
+    few_shot_before: str = ""
+    few_shot_after: str = ""
+    confidence: float = 0.0
+    superseded_at: Optional[datetime] = None    # when this version was replaced
+    superseded_by: Optional[str] = None          # pattern_id of replacement (if forked)
+    created_at: datetime = Field(default_factory=_now)

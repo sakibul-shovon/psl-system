@@ -129,6 +129,7 @@ def run_agent(
     document_id: str,
     query: str,
     draft_type: str = "case_fact_summary",
+    skip_patterns: bool = False,
 ) -> DraftingState:
     """
     Entry point for the API route.
@@ -137,9 +138,11 @@ def run_agent(
     The caller reads state["final_*"] fields to build the HTTP response.
 
     Args:
-        document_id: UUID of the ingested document in SQLite.
-        query:       The user's natural-language request.
-        draft_type:  One of "case_fact_summary", "demand_letter", etc.
+        document_id:   UUID of the ingested document in SQLite.
+        query:         The user's natural-language request.
+        draft_type:    One of "case_fact_summary", "demand_letter", etc.
+        skip_patterns: If True, the planner skips pattern retrieval. Used by
+                       scripts/ab_test.py to create a no-pattern control group.
 
     Returns:
         The completed DraftingState after the graph has run to END.
@@ -147,9 +150,10 @@ def run_agent(
                     final_judge_scores, final_adherence.
     """
     initial_state: DraftingState = {
-        "document_id": document_id,
-        "query":       query,
-        "draft_type":  draft_type,
+        "document_id":   document_id,
+        "query":         query,
+        "draft_type":    draft_type,
+        "skip_patterns": skip_patterns,
     }
 
     logger.info(

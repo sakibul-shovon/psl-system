@@ -126,6 +126,7 @@ def assembler_node(state: DraftingState) -> dict:
                 "documentType":     state.get("document_type", "unknown"),
                 "draftType":        draft_type,
                 "agentIterations":  state.get("iteration", 0),
+                "query":            query,  # stored so /feedback can build episodic memory
             }),
         )
         session.add(draft_row)
