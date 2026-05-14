@@ -13,10 +13,34 @@ that flow through the agent:
   CritiqueItem  — what the critic found wrong
 """
 
-import operator
 from typing import Annotated, Optional
 
 from typing_extensions import TypedDict
+
+
+def _merge_section_drafts(
+    existing: list["SectionDraft"],
+    incoming: list["SectionDraft"],
+) -> list["SectionDraft"]:
+    """
+    Custom reducer for section_drafts.
+
+    When a Refiner re-runs an Executor for a weak section, the new draft
+    must REPLACE the old one, not append alongside it. This reducer keeps
+    the latest version of each section_id.
+
+    Why not operator.add?
+      operator.add just concatenates. If sec_2 is rewritten, we'd end up
+      with two sec_2 entries — one bad, one good. The assembler would have
+      to guess which one to use. This reducer resolves it here instead.
+
+    Order: existing entries first, incoming overwrites by section_id.
+    """
+    merged: dict[str, "SectionDraft"] = {d["section_id"]: d for d in existing}
+    for draft in incoming:
+        merged[draft["section_id"]] = draft   # newer version wins
+    # Return in section_id order so the final output is deterministic
+    return sorted(merged.values(), key=lambda d: d["section_id"])
 
 
 # ── SectionPlan ───────────────────────────────────────────────────────────────
@@ -83,9 +107,10 @@ class DraftingState(TypedDict, total=False):
     plan: list[SectionPlan]
 
     # ── Executor outputs ──────────────────────────────────────────────────────
-    # `operator.add` = "append to this list" when multiple nodes write to it.
-    # Without this, parallel nodes would race to overwrite each other.
-    section_drafts: Annotated[list[SectionDraft], operator.add]
+    # Custom reducer: parallel executors append their section; refined sections
+    # overwrite the original by section_id (latest version wins).
+    # See _merge_section_drafts above for the full explanation.
+    section_drafts: Annotated[list[SectionDraft], _merge_section_drafts]
 
     # ── Critic output ─────────────────────────────────────────────────────────
     critique: list[CritiqueItem]
