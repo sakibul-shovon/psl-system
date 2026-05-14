@@ -12,6 +12,7 @@ qdrant-client==1.12.0           # vector database client
 
 # ─── Retrieval + ML ───────────────────────────────────────────────────────
 sentence-transformers==3.1.1    # pulls in torch + transformers automatically
+transformers>=4.35.0            # TrOCR handwriting fallback (already installed via sentence-transformers)
 rank-bm25==0.2.2                # pure-Python BM25 index
 numpy==1.26.4                   # pinned to <2.0 for compat with older ML libs
 
