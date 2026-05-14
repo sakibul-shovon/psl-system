@@ -94,6 +94,11 @@ class DraftingState(TypedDict, total=False):
     # ── Patterns (retrieved once, shared across all executors) ────────────────
     patterns: list[dict]
 
+    # ── Executor private slot ─────────────────────────────────────────────────
+    # Set by the dispatcher via Send() — each executor sees its own section here.
+    # Never written to directly; always comes from the fan-out dispatch.
+    current_section: Optional[SectionPlan]
+
     # ── Final output (assembled after critic approves) ────────────────────────
     final_draft_id: str
     final_title: str
