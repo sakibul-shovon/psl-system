@@ -13,6 +13,7 @@ import logging
 import google.generativeai as genai
 
 from python_service.config import settings
+from python_service.observability.langfuse_client import observe
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ def _ensure_client() -> None:
         _client_initialized = True
 
 
+@observe(name="gemini-generate-draft")
 def generate_draft(prompt: str) -> dict:
     """
     Send the assembled prompt to Gemini 2.5 Flash and parse the JSON response.

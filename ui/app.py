@@ -7,6 +7,7 @@ Run with:
 Requires the FastAPI backend running on http://localhost:8000
 """
 
+import json
 import time
 import httpx
 import streamlit as st
@@ -37,7 +38,7 @@ st.sidebar.title("⚖️ PSL Intelligence")
 st.sidebar.caption("Pearson Specter Litt")
 page = st.sidebar.radio(
     "Navigate",
-    ["Upload", "Query", "Draft", "Feedback", "Metrics"],
+    ["Upload", "Query", "Draft", "Feedback", "Metrics", "Comparison", "Agent Trace"],
     index=0,
 )
 
@@ -195,8 +196,166 @@ elif page == "Draft":
         placeholder="Summarize the compensation and termination terms",
     )
     draft_type = st.selectbox("Draft type", ["case_fact_summary"])
+    live_mode = st.checkbox("Live progress (stream sections as they arrive)", value=True)
 
-    if st.button("Generate Draft", type="primary") and doc_id and query:
+    def _render_draft_result(data: dict):
+        """Render metrics + sections from a completed draft dict."""
+        st.session_state.last_draft = data
+
+        gs = data.get("grounding_score", 0)
+        gs_color = "🟢" if gs >= 0.75 else "🟡" if gs >= 0.50 else "🔴"
+        js = data.get("judge_scores", {})
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Grounding", f"{gs_color} {gs:.2f}")
+        col2.metric("Patterns applied", data.get("patterns_applied", 0))
+        col3.metric("Adherence", f"{data.get('adherence_score', 1.0):.2f}")
+        col4.metric("Judge overall", f"{js.get('overall', '?')} / 5")
+        st.divider()
+
+        with st.expander("Judge Scorecard (Groq 70B independent evaluation)"):
+            jcol1, jcol2, jcol3, jcol4 = st.columns(4)
+            jcol1.metric("Groundedness", f"{js.get('groundedness', '?')} / 5")
+            jcol2.metric("Completeness", f"{js.get('completeness', '?')} / 5")
+            jcol3.metric("Structure", f"{js.get('structure', '?')} / 5")
+            jcol4.metric("Overall", f"{js.get('overall', '?')} / 5")
+            if js.get("reasoning"):
+                st.caption(f"Reasoning: {js['reasoning']}")
+
+        st.subheader(data.get("title", "Draft"))
+        for section in data.get("sections", []):
+            title = section.get("section_title") or section.get("title", "")
+            gs = section.get("grounding_score", 0)
+            gs_icon = "🟢" if gs >= 0.75 else "🟡" if gs >= 0.5 else "🔴"
+            st.markdown(f"#### {title} {gs_icon}")
+            st.write(section.get("content", ""))
+
+            # ── Click-to-expand evidence items ────────────────────────────────
+            evidence_map = section.get("evidence_map", {})
+            cited = section.get("evidence_ids") or section.get("citedEvidence", [])
+            if cited and evidence_map:
+                with st.expander(f"Evidence cited: {', '.join(cited)}"):
+                    for eid in cited:
+                        ev = evidence_map.get(eid)
+                        if ev:
+                            tier = ev.get("confidence_tier", "HIGH")
+                            tier_icon = "⚠️" if tier != "HIGH" else ""
+                            st.markdown(f"**[{eid}]** {ev.get('breadcrumb', '')} {tier_icon}")
+                            st.caption(ev.get("content", ""))
+                            st.markdown("---")
+            elif cited:
+                st.caption(f"Evidence cited: {', '.join(cited)}")
+            st.divider()
+
+        adherence = data.get("adherence_detail", [])
+        if adherence:
+            with st.expander("Pattern adherence detail"):
+                for a in adherence:
+                    icon = "✅" if a["result"] == "FOLLOWED" else "❌"
+                    st.write(f"{icon} **{a['result']}** — {a['description']}")
+
+    # ── Streaming path ─────────────────────────────────────────────────────────
+    if live_mode and st.button("Generate Draft", type="primary") and doc_id and query:
+        status   = st.empty()
+        sections_area = st.container()
+        metrics_area  = st.empty()
+        section_slots: dict = {}
+
+        try:
+            with httpx.stream(
+                "POST", f"{API}/draft/stream",
+                json={"document_id": doc_id, "query": query, "draft_type": draft_type},
+                timeout=180,
+            ) as resp:
+                status.info("Connecting to agent...")
+
+                for line in resp.iter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    try:
+                        evt = json.loads(line[6:])
+                    except json.JSONDecodeError:
+                        continue
+
+                    etype = evt.get("event")
+                    edata = evt.get("data", {})
+
+                    if etype == "planner_done":
+                        plan = edata.get("plan", [])
+                        n_pat = edata.get("patterns_count", 0)
+                        doc_t = edata.get("document_title", "")
+                        status.info(
+                            f"📋 Plan ready — {len(plan)} section(s) | "
+                            f"{n_pat} pattern(s) | {doc_t}"
+                        )
+                        with sections_area:
+                            for sec in plan:
+                                st.markdown(f"#### {sec['title']}")
+                                slot = st.empty()
+                                slot.caption("_Generating..._")
+                                section_slots[sec["section_id"]] = slot
+                                st.divider()
+
+                    elif etype == "section_ready":
+                        for sec_data in edata:
+                            sid = sec_data["section_id"]
+                            gs  = sec_data.get("grounding_score", 0)
+                            conf = sec_data.get("confidence", "?")
+                            icon = "🟢" if gs >= 0.75 else "🟡" if gs >= 0.5 else "🔴"
+                            if sid in section_slots:
+                                section_slots[sid].markdown(
+                                    f"{sec_data.get('content', '')}\n\n"
+                                    f"_{icon} Grounding: {gs:.2f} | Confidence: {conf}_"
+                                )
+
+                    elif etype == "critic_done":
+                        itr  = edata.get("iteration", 0)
+                        weak = edata.get("weak_count", 0)
+                        if weak:
+                            status.warning(
+                                f"🔍 Critic (pass {itr}): {weak} section(s) flagged — refining..."
+                            )
+                        else:
+                            status.success(f"🔍 Critic (pass {itr}): all sections passed ✓")
+
+                    elif etype == "refiner_done":
+                        status.info(
+                            f"🔄 Refiner: improving queries (iteration {edata.get('iteration', '?')})"
+                        )
+
+                    elif etype == "done":
+                        gs  = edata.get("grounding_score", 0)
+                        js  = edata.get("judge_scores", {})
+                        icon = "🟢" if gs >= 0.75 else "🟡" if gs >= 0.5 else "🔴"
+                        status.success(
+                            f"✅ Done! {icon} Grounding: {gs:.2f} | "
+                            f"Judge: {js.get('overall', '?')}/5 | "
+                            f"Iterations: {edata.get('agent_iterations', 0)}"
+                        )
+                        st.session_state.last_draft = {
+                            "draft_id":       edata.get("draft_id"),
+                            "document_id":    doc_id,
+                            "title":          edata.get("title", query),
+                            "sections":       edata.get("sections", []),
+                            "grounding_score": gs,
+                            "judge_scores":   js,
+                            "adherence_score": edata.get("adherence_score", 1.0),
+                            "adherence_detail": edata.get("adherence_detail", []),
+                            "patterns_applied": 0,
+                            "warnings":       [],
+                            "evidence_used":  [],
+                            "agent_iterations": edata.get("agent_iterations", 0),
+                            "trace_id":       None,
+                        }
+
+                    elif etype == "error":
+                        status.error(f"Agent error: {edata.get('message', 'unknown')}")
+
+        except Exception as exc:
+            st.error(f"Streaming failed: {exc}")
+
+    # ── Non-streaming path ─────────────────────────────────────────────────────
+    elif not live_mode and st.button("Generate Draft", type="primary") and doc_id and query:
         with st.spinner("Generating (this takes 10–20 seconds)..."):
             data, err = api(
                 "POST", "/draft",
@@ -213,55 +372,7 @@ elif page == "Draft":
                 f"below threshold. {data.get('diagnostic', '')}"
             )
         elif data:
-            st.session_state.last_draft = data
-
-            # ── Header metrics ──
-            col1, col2, col3, col4 = st.columns(4)
-            gs = data.get("grounding_score", 0)
-            gs_color = "🟢" if gs >= 0.75 else "🟡" if gs >= 0.50 else "🔴"
-            col1.metric("Grounding", f"{gs_color} {gs:.2f}")
-            col2.metric("Patterns applied", data.get("patterns_applied", 0))
-            col3.metric("Adherence", f"{data.get('adherence_score', 1.0):.2f}")
-
-            js = data.get("judge_scores", {})
-            col4.metric("Judge overall", f"{js.get('overall', '?')} / 5")
-
-            st.divider()
-
-            # ── Judge scorecard ──
-            with st.expander("Judge Scorecard (Groq 70B independent evaluation)"):
-                jcol1, jcol2, jcol3, jcol4 = st.columns(4)
-                jcol1.metric("Groundedness", f"{js.get('groundedness', '?')} / 5")
-                jcol2.metric("Completeness", f"{js.get('completeness', '?')} / 5")
-                jcol3.metric("Structure", f"{js.get('structure', '?')} / 5")
-                jcol4.metric("Overall", f"{js.get('overall', '?')} / 5")
-                if js.get("reasoning"):
-                    st.caption(f"Reasoning: {js['reasoning']}")
-
-            # ── Draft sections ──
-            st.subheader(data.get("title", "Draft"))
-            for section in data.get("sections", []):
-                st.markdown(f"#### {section.get('title', '')}")
-                st.write(section.get("content", ""))
-                cited = section.get("citedEvidence", [])
-                if cited:
-                    st.caption(f"Evidence cited: {', '.join(cited)}")
-                st.divider()
-
-            # ── Warnings ──
-            warnings = data.get("warnings", [])
-            if warnings:
-                with st.expander(f"{len(warnings)} grounding warning(s)"):
-                    for w in warnings:
-                        st.warning(f"**{w['type']}**: {w['sentence'][:120]}")
-
-            # ── Adherence detail ──
-            adherence = data.get("adherence_detail", [])
-            if adherence:
-                with st.expander("Pattern adherence detail"):
-                    for a in adherence:
-                        icon = "✅" if a["result"] == "FOLLOWED" else "❌"
-                        st.write(f"{icon} **{a['result']}** — {a['description']}")
+            _render_draft_result(data)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -430,4 +541,186 @@ elif page == "Metrics":
                     st.caption(
                         f"Frequency: {p['frequency']} | "
                         f"Created: {p['created_at'][:10]}"
+                    )
+
+                    # ── D.6: Pattern impact metrics ──────────────────────────
+                    impact, ierr = api("GET", f"/patterns/{p['pattern_id']}/impact")
+                    if impact and not ierr:
+                        i1, i2, i3 = st.columns(3)
+                        i1.metric("Drafts applied to", impact.get("drafts_applied_to", 0))
+                        avg_j = impact.get("avg_judge_overall_when_applied")
+                        i2.metric(
+                            "Avg judge (when applied)",
+                            f"{avg_j:.2f} / 5" if avg_j is not None else "—",
+                        )
+                        i3.metric(
+                            "Operator consensus",
+                            f"{impact.get('operator_consensus', 0):.0%}",
+                        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 6 — COMPARISON  (D.5)
+# ══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Comparison":
+    st.title("Baseline vs Improved Comparison")
+    st.caption(
+        "Compare draft quality before and after the pattern learning loop. "
+        "Drafts with no patterns applied are the baseline; drafts with patterns are the improved cohort."
+    )
+
+    if st.button("Refresh"):
+        st.rerun()
+
+    report, err = api("GET", "/evaluation/improvement-report")
+    if err:
+        st.error(f"Could not load report: {err}")
+    elif not report or not report.get("has_data"):
+        st.info(
+            report.get("message", "Not enough data yet.") if report else "Not enough data yet."
+        )
+        st.caption(
+            "To generate comparison data: generate some drafts without patterns (baseline), "
+            "then submit edits to learn patterns, then generate more drafts."
+        )
+    else:
+        b     = report["before_patterns"]
+        a     = report["after_patterns"]
+        delta = report["delta"]
+
+        st.subheader("Quality Cohort Comparison")
+        col_b, col_sep, col_a = st.columns([5, 1, 5])
+
+        with col_b:
+            st.markdown("### Baseline (no patterns)")
+            st.metric("Drafts", b["draft_count"])
+            gs_b = b.get("avg_grounding_score") or 0
+            st.metric("Avg grounding score", f"{gs_b:.3f}")
+            bj = b.get("avg_judge_scores", {})
+            st.metric("Judge — groundedness", f"{bj.get('groundedness') or '—'}")
+            st.metric("Judge — completeness", f"{bj.get('completeness') or '—'}")
+            st.metric("Judge — structure",    f"{bj.get('structure') or '—'}")
+            st.metric("Judge — overall",      f"{bj.get('overall') or '—'}")
+
+        with col_sep:
+            st.markdown("<div style='border-left:2px solid #ccc;height:300px;margin:auto'></div>",
+                        unsafe_allow_html=True)
+
+        with col_a:
+            st.markdown("### Improved (with patterns)")
+            st.metric("Drafts", a["draft_count"])
+            gs_a = a.get("avg_grounding_score") or 0
+            st.metric(
+                "Avg grounding score",
+                f"{gs_a:.3f}",
+                delta=f"{delta['grounding_score']:+.3f}",
+            )
+            aj = a.get("avg_judge_scores", {})
+            st.metric("Judge — groundedness", f"{aj.get('groundedness') or '—'}")
+            st.metric("Judge — completeness", f"{aj.get('completeness') or '—'}")
+            st.metric("Judge — structure",    f"{aj.get('structure') or '—'}")
+            st.metric(
+                "Judge — overall",
+                f"{aj.get('overall') or '—'}",
+                delta=f"{delta['overall_judge_score']:+.2f}",
+            )
+
+        st.divider()
+        st.subheader("What the delta means")
+        dg  = delta["grounding_score"]
+        dj  = delta["overall_judge_score"]
+        dg_icon  = "🟢" if dg  > 0 else "🔴" if dg  < 0 else "⚪"
+        dj_icon  = "🟢" if dj  > 0 else "🔴" if dj  < 0 else "⚪"
+        st.markdown(
+            f"- {dg_icon} Grounding score changed by **{dg:+.3f}** "
+            f"(higher = more claims backed by evidence)\n"
+            f"- {dj_icon} Judge overall changed by **{dj:+.2f}** / 5 "
+            f"(higher = Groq 70B rated the draft better)"
+        )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE 7 — AGENT TRACE  (D.7)
+# ══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Agent Trace":
+    st.title("Agent State Visualization")
+    st.caption(
+        "Inspect the node-level execution of any draft run — which nodes fired, "
+        "how many iterations, and the grounding score of every section."
+    )
+
+    if st.button("Refresh"):
+        st.rerun()
+
+    traces_data, terr = api("GET", "/traces?limit=30")
+    if terr:
+        st.error(f"Could not load traces: {terr}")
+    elif not traces_data or not traces_data.get("traces"):
+        st.info("No traces recorded yet. Generate a draft first.")
+    else:
+        trace_list = traces_data["traces"]
+
+        # Build a human-readable label for the selectbox
+        def _trace_label(t: dict) -> str:
+            ts   = t.get("created_at", "")[:19].replace("T", " ")
+            ms   = t.get("total_duration_ms")
+            dur  = f"{ms / 1000:.1f}s" if ms else "?"
+            did  = (t.get("draft_id") or "no draft")[:8]
+            return f"{ts}  ({dur})  draft:{did}"
+
+        labels = [_trace_label(t) for t in trace_list]
+        ids    = [t["trace_id"] for t in trace_list]
+
+        choice = st.selectbox("Select a trace", labels)
+        trace_id = ids[labels.index(choice)]
+
+        trace, terr2 = api("GET", f"/traces/{trace_id}")
+        if terr2:
+            st.error(f"Could not load trace detail: {terr2}")
+        elif trace:
+            # ── Top-level info ────────────────────────────────────────────────
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Total duration", f"{(trace.get('total_duration_ms') or 0) / 1000:.1f}s")
+            c2.metric("Draft ID", (trace.get("draft_id") or "—")[:12])
+            c3.metric("Document ID", (trace.get("document_id") or "—")[:12])
+
+            st.divider()
+
+            # ── Agent node detail ─────────────────────────────────────────────
+            nodes = trace.get("agent_nodes")
+            if nodes:
+                st.subheader("Node Execution Flow")
+
+                # Node sequence as a visual pipeline string
+                seq = nodes.get("nodes_run", [])
+                st.code(" → ".join(seq), language=None)
+
+                n1, n2, n3, n4 = st.columns(4)
+                n1.metric("Sections planned",   nodes.get("plan_sections", "?"))
+                n2.metric("Sections executed",  nodes.get("sections_executed", "?"))
+                n3.metric("Refinement passes",  nodes.get("refinement_iterations", "?"))
+                n4.metric("Patterns injected",  nodes.get("patterns_injected", "?"))
+
+                st.divider()
+                st.subheader("Per-Section Results")
+                for sec in nodes.get("per_section", []):
+                    gs   = sec.get("grounding_score", 0)
+                    conf = sec.get("confidence", "?")
+                    icon = "🟢" if gs >= 0.75 else "🟡" if gs >= 0.5 else "🔴"
+                    st.markdown(
+                        f"{icon} **{sec['section_id']}** — {sec.get('title', '')}  "
+                        f"| Grounding: `{gs:.2f}` | Confidence: `{conf}`"
+                    )
+            else:
+                st.info("No agent node detail available for this trace (pre-D.2 trace).")
+
+            # ── Raw stage timings ─────────────────────────────────────────────
+            with st.expander("Raw stage timings"):
+                for stage in trace.get("stages", []):
+                    ms = stage.get("durationMs", 0)
+                    st.markdown(
+                        f"**{stage.get('stage')}** — {ms}ms"
+                        + (f" | model: `{stage['model']}`" if stage.get("model") else "")
                     )

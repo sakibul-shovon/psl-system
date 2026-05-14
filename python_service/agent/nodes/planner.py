@@ -32,6 +32,7 @@ from python_service.db.session import engine
 from python_service.edit_loop.pattern_retriever import retrieve_patterns
 from python_service.embedder import embed_one
 from python_service.vector.qdrant_store import qdrant_store
+from python_service.observability.langfuse_client import observe
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,7 @@ def _retrieve_episodic_context(query: str, document_type: str) -> str:
     return "\n".join(lines)
 
 
+@observe(name="gemini-planner")
 def _call_gemini(prompt: str) -> dict:
     """
     Call Gemini 2.5 Flash in JSON mode and return the parsed dict.

@@ -28,6 +28,7 @@ from typing import Optional
 from groq import Groq
 
 from python_service.config import settings
+from python_service.observability.langfuse_client import observe
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,7 @@ def _get_client() -> Groq:
     return _client
 
 
+@observe(name="groq-classify-edit")
 def classify_edit(original_text: str, edited_text: str) -> dict:
     """
     Classify what kind of edit was made.

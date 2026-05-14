@@ -68,6 +68,16 @@ def assembler_node(state: DraftingState) -> dict:
             "evidence_ids":  d["cited_evidence"],
             "confidence":    d["confidence"],
             "grounding_score": d["grounding_score"],
+            # Full evidence items kept so the UI can expand [E1] inline citations.
+            # Keyed by evidence_id so the UI can look up "E1" → breadcrumb + content.
+            "evidence_map": {
+                ev.get("evidence_id", ""): {
+                    "breadcrumb":       ev.get("breadcrumb", ""),
+                    "content":          ev.get("content", "")[:600],
+                    "confidence_tier":  ev.get("confidence_tier", "HIGH"),
+                }
+                for ev in d.get("evidence_items", [])
+            },
         }
         for d in sorted_drafts
     ]

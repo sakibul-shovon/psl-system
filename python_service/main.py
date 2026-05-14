@@ -13,6 +13,7 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 
 from python_service.config import settings
@@ -336,8 +337,9 @@ async def generate_document_draft(body: dict):
     # the final DraftingState.
     trace = TraceBuilder("generate_draft", document_id=document_id)
     try:
-        with trace.stage("agent_graph", model="gemini-2.5-flash+nli-deberta+llama-3.3-70b"):
+        with trace.stage("agent_graph", model="gemini-2.5-flash+nli-deberta+llama-3.3-70b") as _stage:
             state = run_agent(document_id, query, draft_type, skip_patterns=skip_patterns)
+            _stage["meta"]["agent_nodes"] = _agent_node_detail(state)
     except Exception as exc:
         logger.error("Agent run failed for document %r: %s", document_id, exc)
         raise HTTPException(status_code=500, detail=f"Agent error: {exc}")
@@ -391,6 +393,62 @@ async def generate_document_draft(body: dict):
         "agent_iterations": state.get("iteration", 0),
         "trace_id":         trace.trace_id,
     }
+
+
+@app.post("/draft/stream")
+async def stream_draft(body: dict):
+    """
+    SSE streaming endpoint for draft generation.
+
+    Emits server-sent events as each agent node completes so the UI can show
+    live progress instead of waiting 10–20 s with a spinner.
+
+    Events (each line: `data: <json>\\n\\n`):
+      planner_done  — plan decomposed: {"plan": [...], "patterns_count": N}
+      section_ready — one executor finished: [{"section_id", "title", "content", ...}]
+      critic_done   — critic ran: {"iteration": N, "weak_count": N}
+      refiner_done  — refiner improved queries: {"iteration": N}
+      done          — assembler finished: full draft result
+      error         — agent raised: {"message": "..."}
+    """
+    import json as _json
+    from python_service.agent.graph import drafting_agent
+
+    document_id   = body.get("document_id")
+    query         = body.get("query", "").strip()
+    draft_type    = body.get("draft_type", "case_fact_summary")
+    skip_patterns = bool(body.get("skip_patterns", False))
+
+    if not document_id:
+        raise HTTPException(status_code=400, detail="'document_id' is required")
+    if not query:
+        raise HTTPException(status_code=400, detail="'query' is required")
+
+    with Session(engine) as session:
+        doc = session.get(Document, document_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail=f"Document {document_id!r} not found")
+
+    initial_state = {
+        "document_id":   document_id,
+        "query":         query,
+        "draft_type":    draft_type,
+        "skip_patterns": skip_patterns,
+    }
+
+    def event_stream():
+        try:
+            for chunk in drafting_agent.stream(initial_state, stream_mode="updates"):
+                for node_name, update in chunk.items():
+                    payload = _node_to_sse_event(node_name, update)
+                    if payload:
+                        yield f"data: {_json.dumps(payload)}\n\n"
+        except Exception as exc:
+            logger.error("Stream draft failed: %s", exc)
+            err_payload = {"event": "error", "data": {"message": str(exc)}}
+            yield f"data: {_json.dumps(err_payload)}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/feedback")
@@ -626,6 +684,14 @@ async def get_trace(trace_id: str):
     if not row:
         raise HTTPException(status_code=404, detail=f"Trace {trace_id!r} not found")
 
+    stages = _json.loads(row.stages_json or "[]")
+
+    # Extract agent node detail stored inside the agent_graph stage meta.
+    agent_nodes = next(
+        (s.get("meta", {}).get("agent_nodes") for s in stages if s.get("stage") == "agent_graph"),
+        None,
+    )
+
     return {
         "trace_id":          row.trace_id,
         "request_type":      row.request_type,
@@ -634,7 +700,8 @@ async def get_trace(trace_id: str):
         "created_at":        row.created_at.isoformat(),
         "completed_at":      row.completed_at.isoformat() if row.completed_at else None,
         "total_duration_ms": row.total_duration_ms,
-        "stages":            _json.loads(row.stages_json or "[]"),
+        "stages":            stages,
+        "agent_nodes":       agent_nodes,
     }
 
 
@@ -695,6 +762,127 @@ async def pattern_impact(pattern_id: str):
 
 
 # ── Private helpers ────────────────────────────────────────────────────────────
+
+def _node_to_sse_event(node_name: str, update: dict) -> dict | None:
+    """
+    Convert a LangGraph node update (stream_mode='updates') into an SSE payload.
+
+    Each node returns only its OWN new fields — not the full state — so we
+    read exactly what each node writes back:
+      planner   → plan, patterns, document_title
+      executor  → section_drafts (one element, before operator.add merges it)
+      critic    → critique list + iteration
+      refiner   → updated plan
+      assembler → final_* fields
+    """
+    if node_name == "planner":
+        plan = update.get("plan", [])
+        return {
+            "event": "planner_done",
+            "data": {
+                "plan": [
+                    {
+                        "section_id": s["section_id"],
+                        "title":      s["title"],
+                        "brief":      s.get("brief", ""),
+                    }
+                    for s in plan
+                ],
+                "patterns_count":  len(update.get("patterns", [])),
+                "document_title":  update.get("document_title", ""),
+            },
+        }
+
+    if node_name == "executor":
+        drafts = update.get("section_drafts", [])
+        return {
+            "event": "section_ready",
+            "data": [
+                {
+                    "section_id":      d["section_id"],
+                    "title":           d["title"],
+                    "content":         d["content"],
+                    "confidence":      d["confidence"],
+                    "grounding_score": d["grounding_score"],
+                }
+                for d in drafts
+            ],
+        }
+
+    if node_name == "critic":
+        critique = update.get("critique", [])
+        return {
+            "event": "critic_done",
+            "data": {
+                "iteration":  update.get("iteration", 0),
+                "weak_count": len(critique),
+                "weak_ids":   [c["section_id"] for c in critique],
+            },
+        }
+
+    if node_name == "refiner":
+        return {
+            "event": "refiner_done",
+            "data": {"iteration": update.get("iteration", 0)},
+        }
+
+    if node_name == "assembler":
+        adherence = update.get("final_adherence", {})
+        return {
+            "event": "done",
+            "data": {
+                "draft_id":         update.get("final_draft_id"),
+                "title":            update.get("final_title", ""),
+                "sections":         update.get("final_sections", []),
+                "grounding_score":  update.get("final_grounding_score", 0.0),
+                "judge_scores":     update.get("final_judge_scores", {}),
+                "adherence_score":  adherence.get("adherence_score", 1.0),
+                "adherence_detail": adherence.get("detail", []),
+                "agent_iterations": update.get("iteration", 0),
+            },
+        }
+
+    return None
+
+
+def _agent_node_detail(state: dict) -> dict:
+    """
+    Build a compact agent node-level summary from the final DraftingState.
+
+    Stored inside the agent_graph stage's meta dict so no schema change is
+    needed on the Trace model. Surfaced by GET /traces/{id} as `agent_nodes`.
+    """
+    section_drafts = state.get("section_drafts", [])
+    iterations     = state.get("iteration", 0)
+    plan           = state.get("plan", [])
+    patterns       = state.get("patterns", [])
+
+    n = len(plan)
+    # Reconstruct the node execution sequence from observable state.
+    # planner fires once; executors fire for every section on first pass and
+    # for weak sections only on each refinement pass.
+    nodes_run = [f"planner", f"executor × {n}", "critic"]
+    for i in range(iterations):
+        nodes_run += [f"refiner (iter {i + 1})", "executor (weak sections)", "critic"]
+    nodes_run.append("assembler")
+
+    return {
+        "nodes_run":              nodes_run,
+        "plan_sections":          n,
+        "sections_executed":      len(section_drafts),
+        "refinement_iterations":  iterations,
+        "patterns_injected":      len(patterns),
+        "per_section": [
+            {
+                "section_id":      d["section_id"],
+                "title":           d["title"],
+                "grounding_score": d["grounding_score"],
+                "confidence":      d["confidence"],
+            }
+            for d in sorted(section_drafts, key=lambda d: d["section_id"])
+        ],
+    }
+
 
 def _write_episodic_memory(draft_id: str, edits: list[dict]) -> None:
     """

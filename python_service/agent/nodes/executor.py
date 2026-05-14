@@ -30,6 +30,7 @@ import google.generativeai as genai
 from python_service.agent.state import DraftingState, SectionDraft
 from python_service.config import settings
 from python_service.generation.grounding import verify_draft
+from python_service.observability.langfuse_client import observe
 from python_service.retrieval.evidence import package_evidence
 from python_service.retrieval.hybrid import retrieve
 
@@ -101,6 +102,7 @@ def _build_evidence_block(evidence_items) -> tuple[str, dict]:
     return "\n\n".join(blocks), evidence_map
 
 
+@observe(name="gemini-executor-section")
 def _call_gemini_for_section(prompt: str) -> dict:
     """Call Gemini 2.5 Flash in JSON mode for one section."""
     if not settings.gemini_api_key:
