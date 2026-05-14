@@ -1,0 +1,5 @@
+# UI-only requirements — used by Dockerfile.ui to keep the image small.
+# The Streamlit app only needs these; it calls the API over HTTP, so it
+# doesn't need torch, transformers, qdrant-client, etc.
+streamlit==1.39.0
+httpx==0.27.2

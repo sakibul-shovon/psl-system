@@ -1,0 +1,93 @@
+{
+  "total_queries": 8,
+  "correctly_refused": 7,
+  "incorrectly_answered": 1,
+  "refusal_precision": 0.875,
+  "grade": "GOOD",
+  "target_precision": 0.8,
+  "met_target": true,
+  "refusal_signals": {
+    "A_insufficient_evidence_marker": "any section contains '[INSUFFICIENT EVIDENCE'",
+    "B_low_grounding_score": "grounding_score < 0.30"
+  },
+  "reason_breakdown": {
+    "explicit_refusal_marker": 6,
+    "answered": 1,
+    "low_grounding_score": 1
+  },
+  "results": [
+    {
+      "query_num": 1,
+      "query": "What are the recommended ibuprofen dosages for paediatric patients specified here?",
+      "refused": true,
+      "reason": "explicit_refusal_marker",
+      "grounding_score": 0.0,
+      "sections_count": 0,
+      "synthetic": true
+    },
+    {
+      "query_num": 2,
+      "query": "Explain the Pauli exclusion principle as described in this document.",
+      "refused": true,
+      "reason": "explicit_refusal_marker",
+      "grounding_score": 0.0,
+      "sections_count": 0,
+      "synthetic": true
+    },
+    {
+      "query_num": 3,
+      "query": "What irrigation requirements for rice cultivation are defined in this agreement?",
+      "refused": true,
+      "reason": "explicit_refusal_marker",
+      "grounding_score": 0.0,
+      "sections_count": 0,
+      "synthetic": true
+    },
+    {
+      "query_num": 4,
+      "query": "What patent licensing royalties and technology transfer fees are specified?",
+      "refused": true,
+      "reason": "explicit_refusal_marker",
+      "grounding_score": 0.0,
+      "sections_count": 0,
+      "synthetic": true
+    },
+    {
+      "query_num": 5,
+      "query": "Describe the nuclear waste disposal obligations mandated by this contract.",
+      "refused": false,
+      "reason": "answered",
+      "grounding_score": 0.34,
+      "sections_count": 3,
+      "synthetic": true
+    },
+    {
+      "query_num": 6,
+      "query": "What derivative instrument pricing formulas are embedded in this agreement?",
+      "refused": true,
+      "reason": "low_grounding_score (0.12)",
+      "grounding_score": 0.12,
+      "sections_count": 0,
+      "synthetic": true
+    },
+    {
+      "query_num": 7,
+      "query": "What is the recipe for French boeuf bourguignon mentioned in the document?",
+      "refused": true,
+      "reason": "explicit_refusal_marker",
+      "grounding_score": 0.0,
+      "sections_count": 0,
+      "synthetic": true
+    },
+    {
+      "query_num": 8,
+      "query": "List all proof-of-stake consensus mechanisms described in this contract.",
+      "refused": true,
+      "reason": "explicit_refusal_marker",
+      "grounding_score": 0.0,
+      "sections_count": 0,
+      "synthetic": true
+    }
+  ],
+  "dry_run": true
+}

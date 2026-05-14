@@ -30,6 +30,7 @@ class Settings(BaseSettings):
 
     # ─── Service URLs ────────────────────────────────────────────────────
     qdrant_url: str = "http://localhost:6333"
+    qdrant_api_key: str = ""   # required for Qdrant Cloud; empty = no auth (local)
     database_url: str = "sqlite:///./data/psl.db"
 
     # ─── OCR ─────────────────────────────────────────────────────────────

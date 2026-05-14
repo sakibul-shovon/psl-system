@@ -1,0 +1,89 @@
+# render.yaml — Render Blueprint for the PSL Document Intelligence stack.
+#
+# This file lets Render auto-configure the services when you click
+# "New Blueprint Instance" in the Render dashboard and point it at this repo.
+#
+# BEFORE DEPLOYING:
+#   1. Create a free Qdrant Cloud cluster at https://cloud.qdrant.io/
+#      (1 GB free tier — no credit card required).
+#      Copy the cluster URL and API key — you'll enter them in the Render dashboard.
+#   2. Have your GEMINI_API_KEY and GROQ_API_KEY ready.
+#
+# AFTER DEPLOYING:
+#   1. Note the URL of the psl-api service (e.g. https://psl-api.onrender.com)
+#   2. Set PSL_API_URL=https://psl-api.onrender.com in the psl-ui service's env vars
+#   3. Open the psl-api URL + /docs to run the Swagger UI
+#   4. Run the seed script via the Render shell:
+#        python -m scripts.seed --url https://psl-api.onrender.com
+
+services:
+
+  # ── FastAPI backend ───────────────────────────────────────────────────────────
+  - type: web
+    name: psl-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile.api
+    dockerContext: .
+    plan: free
+    healthCheckPath: /health
+
+    # A persistent disk keeps the SQLite database, BM25 indices, and uploaded files
+    # alive across deploys.  1 GB is enough for a demo.
+    disk:
+      name: psl-data
+      mountPath: /app/data
+      sizeGB: 1
+
+    envVars:
+      # ── Secrets: fill these in the Render dashboard (never commit real keys) ──
+      - key: GEMINI_API_KEY
+        sync: false      # marks it as a secret — Render will prompt you at deploy
+
+      - key: GROQ_API_KEY
+        sync: false
+
+      # ── Qdrant Cloud (from your free cluster at cloud.qdrant.io) ──────────────
+      # Example: https://abc123.us-east4-0.gcp.cloud.qdrant.io:6333
+      - key: QDRANT_URL
+        sync: false
+
+      # If your Qdrant Cloud cluster has an API key (it does by default):
+      - key: QDRANT_API_KEY
+        sync: false
+
+      # ── Static config (safe to commit) ────────────────────────────────────────
+      - key: TESSERACT_CMD
+        value: /usr/bin/tesseract
+
+      - key: DATABASE_URL
+        value: sqlite:////app/data/psl.db   # absolute path to mounted disk
+
+      - key: BM25_DIR
+        value: /app/data/bm25
+
+      - key: UPLOADS_DIR
+        value: /app/data/uploads
+
+      - key: DEFAULT_OPERATOR_ID
+        value: op_harvey
+
+      # ── Optional: Langfuse observability ──────────────────────────────────────
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+
+  # ── Streamlit UI ──────────────────────────────────────────────────────────────
+  - type: web
+    name: psl-ui
+    runtime: docker
+    dockerfilePath: ./Dockerfile.ui
+    dockerContext: .
+    plan: free
+    healthCheckPath: /_stcore/health
+
+    envVars:
+      # Set this to the psl-api service's Render URL after the API deploys.
+      # Example: https://psl-api.onrender.com
+      - key: PSL_API_URL
+        sync: false

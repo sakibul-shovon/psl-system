@@ -40,7 +40,13 @@ class QdrantStore:
     """
 
     def __init__(self) -> None:
-        self.client = QdrantClient(url=settings.qdrant_url, timeout=30)
+        # Pass api_key when QDRANT_API_KEY is set (required for Qdrant Cloud).
+        # For a local Docker container the key is empty and QdrantClient ignores it.
+        self.client = QdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key or None,
+            timeout=30,
+        )
         logger.info("Qdrant client connected to %s", settings.qdrant_url)
 
     # ── Collection bootstrap ────────────────────────────────────────────────

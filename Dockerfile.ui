@@ -1,0 +1,33 @@
+# ── Dockerfile.ui ─────────────────────────────────────────────────────────────
+# Streamlit UI container.
+#
+# This is intentionally minimal: the UI is just a Streamlit frontend that
+# makes HTTP calls to the API container.  It does NOT need torch, tesseract,
+# qdrant-client, or any of the heavy ML libraries.
+#
+# PSL_API_URL tells the Streamlit Python process (server-side) where to find
+# the FastAPI backend.  In Docker Compose this is "http://api:8000" (the
+# service name resolves via Docker's internal DNS).
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install only UI dependencies — much smaller image than the API container
+COPY requirements-ui.txt .
+RUN pip install --no-cache-dir -r requirements-ui.txt
+
+# Copy only the UI source tree
+COPY ui/ ui/
+
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8501
+
+HEALTHCHECK --interval=15s --timeout=10s --retries=3 --start-period=30s \
+    CMD python -c "import httpx; httpx.get('http://localhost:8501/_stcore/health')" || exit 1
+
+CMD ["streamlit", "run", "ui/app.py", \
+     "--server.port=8501", \
+     "--server.address=0.0.0.0", \
+     "--server.headless=true"]

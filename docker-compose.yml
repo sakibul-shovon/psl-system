@@ -1,13 +1,100 @@
+# ── docker-compose.yml ────────────────────────────────────────────────────────
+# Full PSL Document Intelligence stack.
+#
+# Services:
+#   qdrant  — vector database (official image, no build needed)
+#   api     — FastAPI backend  (Dockerfile.api)
+#   ui      — Streamlit frontend (Dockerfile.ui)
+#
+# Dependency chain:
+#   qdrant healthy → api healthy → ui starts
+#
+# Volumes:
+#   qdrant_data   — Qdrant index storage (persists between restarts)
+#   psl_data      — SQLite DB + BM25 indices + uploaded files
+#   model_cache   — HuggingFace model cache (avoids re-downloading on restart)
+#
+# Usage:
+#   docker compose up --build          # first run (builds images, downloads ~1.5 GB of ML models)
+#   docker compose up                  # subsequent runs (uses cached layers + volumes)
+#   docker compose down                # stop all services
+#   docker compose down -v             # stop AND wipe all data volumes
+
 services:
+
+  # ── Qdrant vector DB ─────────────────────────────────────────────────────────
   qdrant:
     image: qdrant/qdrant:v1.12.4
     container_name: psl_qdrant
     ports:
-      - "6333:6333"     # HTTP API and dashboard
-      - "6334:6334"     # gRPC (we won't use it, but expose for tools)
+      - "6333:6333"     # REST API + dashboard (http://localhost:6333/dashboard)
+      - "6334:6334"     # gRPC (not used by PSL, but exposed for tooling)
     volumes:
       - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6333/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
+  # ── FastAPI backend ───────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: psl_api
+    ports:
+      - "8000:8000"
+
+    # .env holds your real API keys (GEMINI_API_KEY, GROQ_API_KEY).
+    # The environment block OVERRIDES the same keys in .env so that Docker-specific
+    # settings (Qdrant URL, Tesseract path) are always correct even if the local
+    # .env still points to localhost values.
+    env_file:
+      - .env
+    environment:
+      QDRANT_URL: http://qdrant:6333
+      TESSERACT_CMD: /usr/bin/tesseract
+      DATABASE_URL: sqlite:///./data/psl.db
+      BM25_DIR: ./data/bm25
+      UPLOADS_DIR: ./data/uploads
+
+    volumes:
+      # Persist SQLite DB, BM25 indices, and uploaded files across restarts
+      - psl_data:/app/data
+      # Cache HuggingFace models — first start downloads ~1.5 GB (BAAI/bge + TrOCR).
+      # Subsequent starts load from this volume in seconds.
+      - model_cache:/root/.cache/huggingface
+
+    depends_on:
+      qdrant:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+  # ── Streamlit UI ──────────────────────────────────────────────────────────────
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    container_name: psl_ui
+    ports:
+      - "8501:8501"
+    environment:
+      # PSL_API_URL is read by ui/app.py to locate the FastAPI backend.
+      # "api" resolves to the api container via Docker's internal DNS.
+      PSL_API_URL: http://api:8000
+
+    depends_on:
+      api:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+# ── Named volumes ─────────────────────────────────────────────────────────────
 volumes:
   qdrant_data:
+  psl_data:
+  model_cache:

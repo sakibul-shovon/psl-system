@@ -1,0 +1,57 @@
+# ── Dockerfile.api ────────────────────────────────────────────────────────────
+# FastAPI + Uvicorn container for the PSL Document Intelligence backend.
+#
+# What's installed here that isn't in requirements.txt:
+#   tesseract-ocr     — the OCR binary (pytesseract is just a Python wrapper)
+#   tesseract-ocr-eng — English language pack for Tesseract
+#   libgl1            — OpenCV's headless build still links against libGL
+#   libglib2.0-0      — OpenCV runtime dependency on Linux
+#   curl              — used by the Docker healthcheck
+#
+# ML model cache: models are NOT baked into the image to keep it manageable.
+# Mount a named volume at /root/.cache/huggingface so they download once and
+# persist across container restarts.
+
+FROM python:3.11-slim
+
+# Install system-level dependencies in one layer to minimise image size
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        tesseract-ocr \
+        tesseract-ocr-eng \
+        libgl1 \
+        libglib2.0-0 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python deps before copying source code.
+# This layer is cached unless requirements.txt changes — speeds up rebuilds.
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy source code
+COPY python_service/ python_service/
+COPY scripts/        scripts/
+COPY examples/       examples/
+
+# Create local data directories (SQLite + BM25 + uploads live here)
+# A named volume is mounted over /app/data so data persists across restarts.
+RUN mkdir -p data/bm25 data/uploads
+
+# Tell pytesseract where the Tesseract binary lives on Linux
+ENV TESSERACT_CMD=/usr/bin/tesseract
+
+# Prevent Python from buffering stdout/stderr (logs appear in real time)
+ENV PYTHONUNBUFFERED=1
+
+EXPOSE 8000
+
+# health check — Docker Compose waits for this before starting dependent services
+HEALTHCHECK --interval=15s --timeout=10s --retries=5 --start-period=90s \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["uvicorn", "python_service.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--workers", "1"]

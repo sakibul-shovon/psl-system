@@ -8,11 +8,14 @@ Requires the FastAPI backend running on http://localhost:8000
 """
 
 import json
+import os
 import time
 import httpx
 import streamlit as st
 
-API = "http://localhost:8000"
+# PSL_API_URL lets Docker Compose override the backend address (http://api:8000).
+# In local dev (no env var set) this falls back to localhost.
+API = os.getenv("PSL_API_URL", "http://localhost:8000")
 
 
 def api(method: str, path: str, **kwargs):

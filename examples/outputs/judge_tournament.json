@@ -1,0 +1,171 @@
+{
+  "n_drafts": 5,
+  "personas": [
+    "strict",
+    "balanced",
+    "lenient"
+  ],
+  "dimensions": [
+    "groundedness",
+    "completeness",
+    "structure",
+    "overall"
+  ],
+  "kappa_results": {
+    "strict_vs_balanced": {
+      "groundedness": 0.0,
+      "completeness": 0.0,
+      "structure": 0.0,
+      "overall": 0.0,
+      "mean_kappa": 0.0
+    },
+    "strict_vs_lenient": {
+      "groundedness": 0.0,
+      "completeness": 0.0,
+      "structure": 0.0,
+      "overall": 0.0,
+      "mean_kappa": 0.0
+    },
+    "balanced_vs_lenient": {
+      "groundedness": -0.25,
+      "completeness": 0.0909,
+      "structure": 0.0,
+      "overall": 0.0,
+      "mean_kappa": -0.0398
+    }
+  },
+  "interpretation": {
+    "strict_vs_balanced": "mean \u03ba=0.000 \u2014 poor",
+    "strict_vs_lenient": "mean \u03ba=0.000 \u2014 poor",
+    "balanced_vs_lenient": "mean \u03ba=-0.040 \u2014 poor"
+  },
+  "target_kappa": 0.6,
+  "records": [
+    {
+      "draft_num": 1,
+      "query": "Summarize the key compensation and payment terms",
+      "scores": {
+        "strict": {
+          "groundedness": 2,
+          "completeness": 2,
+          "structure": 2,
+          "overall": 3
+        },
+        "balanced": {
+          "groundedness": 3,
+          "completeness": 3,
+          "structure": 4,
+          "overall": 3
+        },
+        "lenient": {
+          "groundedness": 4,
+          "completeness": 4,
+          "structure": 4,
+          "overall": 5
+        }
+      },
+      "synthetic": true
+    },
+    {
+      "draft_num": 2,
+      "query": "Describe the termination and severance provisions",
+      "scores": {
+        "strict": {
+          "groundedness": 3,
+          "completeness": 3,
+          "structure": 2,
+          "overall": 2
+        },
+        "balanced": {
+          "groundedness": 4,
+          "completeness": 4,
+          "structure": 4,
+          "overall": 3
+        },
+        "lenient": {
+          "groundedness": 4,
+          "completeness": 3,
+          "structure": 4,
+          "overall": 4
+        }
+      },
+      "synthetic": true
+    },
+    {
+      "draft_num": 3,
+      "query": "What are the confidentiality and non-disclosure obligations?",
+      "scores": {
+        "strict": {
+          "groundedness": 3,
+          "completeness": 2,
+          "structure": 3,
+          "overall": 3
+        },
+        "balanced": {
+          "groundedness": 4,
+          "completeness": 3,
+          "structure": 4,
+          "overall": 3
+        },
+        "lenient": {
+          "groundedness": 3,
+          "completeness": 4,
+          "structure": 4,
+          "overall": 5
+        }
+      },
+      "synthetic": true
+    },
+    {
+      "draft_num": 4,
+      "query": "Summarize the intellectual property ownership clauses",
+      "scores": {
+        "strict": {
+          "groundedness": 3,
+          "completeness": 2,
+          "structure": 3,
+          "overall": 2
+        },
+        "balanced": {
+          "groundedness": 3,
+          "completeness": 3,
+          "structure": 4,
+          "overall": 4
+        },
+        "lenient": {
+          "groundedness": 5,
+          "completeness": 4,
+          "structure": 5,
+          "overall": 4
+        }
+      },
+      "synthetic": true
+    },
+    {
+      "draft_num": 5,
+      "query": "What are the governing law and arbitration terms?",
+      "scores": {
+        "strict": {
+          "groundedness": 2,
+          "completeness": 2,
+          "structure": 2,
+          "overall": 3
+        },
+        "balanced": {
+          "groundedness": 3,
+          "completeness": 5,
+          "structure": 3,
+          "overall": 3
+        },
+        "lenient": {
+          "groundedness": 5,
+          "completeness": 5,
+          "structure": 4,
+          "overall": 5
+        }
+      },
+      "synthetic": true
+    }
+  ],
+  "dry_run": true
+}
