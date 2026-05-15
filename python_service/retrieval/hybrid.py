@@ -87,16 +87,18 @@ def retrieve(
     # ── Insufficient evidence guard ───────────────────────────────────────────
     if not is_sufficient(reranked):
         best = reranked[0]["rerank_score"] if reranked else 0.0
+        from python_service.retrieval.reranker import INSUFFICIENT_EVIDENCE_THRESHOLD as _THRESH
         logger.warning(
-            "Insufficient evidence for query %r: best rerank score %.3f < 0.35",
-            query[:60], best,
+            "Insufficient evidence for query %r: best rerank score %.3f < %.1f",
+            query[:60], best, _THRESH,
         )
         return RetrievalResult(
             sufficient=False,
             evidence=reranked,
             query=query,
             diagnostic=(
-                f"Top relevance score ({best:.3f}) is below the minimum threshold (0.35). "
+                f"Top relevance score ({best:.3f}) is below the minimum threshold "
+                f"({INSUFFICIENT_EVIDENCE_THRESHOLD}). "
                 "The indexed document may not contain information relevant to this query."
             ),
         )

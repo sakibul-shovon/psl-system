@@ -17,6 +17,7 @@ UI can show a live progress bar via GET /job/{id}.
 """
 
 import json
+from datetime import datetime
 import logging
 from pathlib import Path
 
@@ -160,6 +161,13 @@ def _run(file_path: Path, document_id: str, job_id: str, session: Session) -> No
 
     for row in chunk_db_rows:
         session.add(row)
+
+    # Mark the document as fully processed
+    doc = session.get(Document, document_id)
+    if doc:
+        doc.processed_at = datetime.utcnow()
+        session.add(doc)
+
     session.commit()
 
     # ── Stage 8: Build BM25 index ───────────────────────────────────────────

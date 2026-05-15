@@ -122,7 +122,7 @@ def _retrieve_episodic_context(query: str, document_type: str) -> str:
 
 
 @observe(name="groq-planner")
-def _call_gemini(prompt: str) -> dict:
+def _call_groq(prompt: str) -> dict:
     """Call Groq Llama 3.3 70B in JSON mode and return the parsed dict."""
     if not settings.groq_api_key:
         raise RuntimeError("GROQ_API_KEY not set in .env")
@@ -204,10 +204,10 @@ def planner_node(state: DraftingState) -> dict:
     )
 
     try:
-        result = _call_gemini(prompt)
+        result = _call_groq(prompt)
         raw_sections = result.get("sections", [])
     except (json.JSONDecodeError, Exception) as exc:
-        logger.error("Planner Gemini call failed: %s — using fallback plan", exc)
+        logger.error("Planner Groq call failed: %s — using fallback plan", exc)
         # Fallback: one generic section so the pipeline can still continue
         raw_sections = [
             {

@@ -130,8 +130,8 @@ def assembler_node(state: DraftingState) -> dict:
             judge_scores_json=json.dumps(judge_scores),
             applied_pattern_ids_json=json.dumps(applied_pattern_ids),
             processing_meta_json=json.dumps({
-                "generationModel":  "gemini-2.5-flash",
-                "judgeModel":       "llama-3.3-70b-versatile",
+                "generationModel":  "groq/llama-3.3-70b-versatile",
+                "judgeModel":       "groq/llama-3.3-70b-versatile",
                 "retrievalMethod":  "dense+bm25+rerank (per-section)",
                 "patternsApplied":  len(patterns),
                 "adherenceScore":   adherence["adherence_score"],

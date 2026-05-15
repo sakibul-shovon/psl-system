@@ -1,253 +1,352 @@
 # PSL Document Intelligence
 
-> **Legal AI that refuses to hallucinate — and gets better every day.**
-
-| Metric | Value |
-|--------|-------|
-| Edit-distance reduction after 5 operator edit rounds | **59%** (0.691 → 0.283 normalised Levenshtein) |
-| Adversarial refusal precision (off-topic queries rejected) | **87.5%** |
-| Retrieval precision@3 for known structured facts | **85.7%** |
-| NLI grounding check latency | **~50 ms/sentence** (local CPU) |
-| Agent refinement iterations (max) | **3 critic→refiner loops** |
+> Legal document AI that stays grounded in source material and improves from every operator edit.
 
 ---
 
-## The Problem
+## What This System Does
 
-When a lawyer asks an AI system "what are the indemnification terms in this contract?", there are two ways it can respond:
+Legal AI systems commonly generate plausible-sounding text that has no basis in the actual document. A clause gets cited that does not exist. A figure gets invented that was never in the contract. The text looks authoritative. It is fabricated.
 
-1. It reads the document, locates the relevant clause, and cites it with the exact section reference.
-2. It generates a plausible-sounding indemnification clause from training data, regardless of what the document actually says.
+This system is built to solve that problem directly. Every factual sentence in a generated draft is verified against the retrieved evidence using an NLI model before delivery. If evidence is insufficient, the system says so rather than guessing. If a sentence contradicts the source material, the grounding score reflects that.
 
-Most legal AI systems do the second. The text looks professional. The structure matches what indemnification terms usually look like. And it is entirely fabricated.
-
-This is not just a demo bug — it is a structural problem. Without a grounding mechanism that checks every factual claim against the source document, an AI drafting assistant cannot be trusted with real legal work. And without a learning loop, every correction made by a lawyer disappears the moment the session ends.
-
-PSL Document Intelligence addresses both problems directly. It is built around four pillars:
-
-1. **Ingest** — extract text from any quality of PDF or scan, even handwritten documents.
-2. **Retrieve** — find the most relevant evidence for any query using hybrid BM25 + semantic search.
-3. **Generate** — draft sections with inline citations, NLI-verified grounding scores, and an independent LLM judge.
-4. **Learn** — every edit made by a lawyer is extracted as a reusable pattern and injected into future drafts.
+The system also learns. Every correction a lawyer makes is extracted as a reusable rule and injected into future drafts. The more lawyers use it, the fewer corrections they need to make.
 
 ---
 
-## Architecture
+## Four Pillars
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│  PILLAR 1 — INGEST                                                      │
+│  Accept any PDF quality → route to correct extraction path →            │
+│  chunk by legal structure → embed → store in SQLite + Qdrant + BM25    │
+├─────────────────────────────────────────────────────────────────────────┤
+│  PILLAR 2 — RETRIEVE                                                    │
+│  BM25 keyword + dense vector → Reciprocal Rank Fusion →                 │
+│  cross-encoder rerank → sufficiency gate → top-5 evidence [E1–E5]      │
+├─────────────────────────────────────────────────────────────────────────┤
+│  PILLAR 3 — GENERATE                                                    │
+│  LangGraph agent: planner → parallel executors → critic → refiner →    │
+│  assembler. NLI grounding on every sentence. Independent LLM judge.    │
+├─────────────────────────────────────────────────────────────────────────┤
+│  PILLAR 4 — LEARN                                                       │
+│  Capture operator edits → classify → extract generalised rule →        │
+│  deduplicate → inject into next draft → measure adherence              │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Architecture Diagram
 
 ```mermaid
 flowchart TD
     subgraph INPUT["Input"]
-        PDF["PDF / Scanned image"]
+        PDF["PDF / Scanned image / Handwritten page"]
     end
 
-    subgraph PILLAR1["Pillar 1 — Ingest"]
-        OCR["Tesseract OCR\n+ confidence annotation"]
-        NORM["Normalise\n(deskew, clean)"]
-        CHUNK["Legal-structure chunker\n(Article → Section → Clause)"]
+    subgraph P1["Pillar 1 — Ingest"]
+        ROUTER["File router\ntext-layer / typed-scan / handwriting"]
+        TESS["Tesseract OCR 5.x\n+ confidence annotation"]
+        TROCR["TrOCR fallback\nmicrosoft/trocr-base-handwritten\n(confidence < 0.35)"]
+        NORM["Line normaliser\ndehyphenation + ligature fix"]
+        CHUNK["Legal-structure chunker\nArticle → Section → Clause\nbreadcrumb per chunk"]
         EMBED["Embedder\nBAAI/bge-base-en-v1.5\n768-dim"]
-        STORE_S["SQLite\n(chunks + metadata)"]
-        STORE_Q["Qdrant\n(chunk vectors)"]
-        STORE_B["BM25 index\n(keyword)"]
+        SQLITE["SQLite\nDocument / Chunk / Draft\nPattern / Trace"]
+        QDRANT["Qdrant\nlegal_chunks\nlearned_patterns\nepisodic_memory"]
+        BM25["BM25 index\npickled per document"]
     end
 
-    subgraph PILLAR2["Pillar 2 — Retrieve"]
+    subgraph P2["Pillar 2 — Retrieve"]
         DENSE["Dense search\nQdrant top-20"]
-        BM25["BM25 keyword\ntop-20"]
-        RRF["Reciprocal Rank\nFusion"]
-        RERANK["Cross-encoder rerank\nms-marco-MiniLM-L-6-v2\ntop-5 [E1–E5]"]
+        KW["BM25 keyword\ntop-20"]
+        RRF["Reciprocal Rank Fusion\nk=60"]
+        RERANK["Cross-encoder rerank\nms-marco-MiniLM-L-6-v2\ntop-5"]
+        GUARD["Sufficiency guard\nbest score ≥ 0.35\nor INSUFFICIENT_EVIDENCE"]
     end
 
-    subgraph AGENT["Pillar 3 — Agentic Draft (LangGraph)"]
-        PATS["Pattern retriever\nQdrant learned_patterns\ncomposite re-rank"]
-        PLAN["Planner\nGemini: decompose query\ninto 4–7 section plans"]
-        EXEC["Executors × N\nper-section retrieval\n+ Gemini generation\n+ NLI grounding\n(parallel)"]
-        CRIT["Critic\ncheck grounding score\ncompleteness + style"]
-        REF["Refiner\nimprove retrieval query\nfor weak sections"]
-        ASM["Assembler\naverage grounding\nGroq judge + save"]
-        NLI["NLI check\nnli-deberta-v3-small\n≥ 0.75 HIGH"]
-        TRACE["Trace audit\nSQLite Trace table\nGET /traces/{id}"]
+    subgraph P3["Pillar 3 — Agentic Draft (LangGraph)"]
+        PAT_RET["Pattern retriever\nQdrant learned_patterns\ncomposite re-rank"]
+        EPI_RET["Episodic memory\n3 most similar past sessions"]
+        PLAN["Planner node\nGemini 2.5 Flash\n4–7 SectionPlan objects"]
+        DISPATCH["Dispatcher\nLangGraph Send — fan-out"]
+        EXEC["Executor × N (parallel)\nper-section retrieval + generation\n+ NLI grounding"]
+        CRIT["Critic node\ncheck grounding / completeness / style\nidentify weak sections"]
+        REF["Refiner node\nimproved retrieval_query\nfor weak sections"]
+        ASM["Assembler node\naverage grounding score\nGroq judge → save Draft"]
+        NLI["NLI grounding\nnli-deberta-v3-small\nENTAILMENT / NEUTRAL / CONTRADICTION"]
+        TRACE["Trace capture\nSQLite Trace + TraceStage\nGET /traces/{id}"]
     end
 
-    subgraph PILLAR4["Pillar 4 — Learn"]
-        EDIT["Operator edits\nPOST /feedback"]
-        CLASS["Edit classifier\nGroq Llama 3.3 70B\nrule type + scope"]
-        EXTRACT["Rule extractor\ngeneralised pattern"]
-        DEDUP["Dedup check\ncosine ≥ 0.85 → reinforce"]
-        PAT_STORE["Pattern store\nSQLite + Qdrant"]
-        EPI["Episodic memory\nQdrant episodic_memory"]
+    subgraph P4["Pillar 4 — Learn"]
+        FEEDBACK["POST /feedback\noperator edits"]
+        CLASS["Edit classifier\nGroq Llama 3.3 70B\nedit_type + scope + rule"]
+        EXTRACT["Pattern extractor\ngeneralised before/after pair"]
+        DEDUP["Dedup check\ncosine ≥ 0.85 → reinforce\notherwise insert new"]
+        PAT_STORE["Pattern store\nSQLite + Qdrant learned_patterns"]
+        EPI_WRITE["Episodic memory write\nQdrant episodic_memory"]
+        DPO["DPO preference data\ndata/preferences.jsonl\nchosen/rejected pairs"]
     end
 
-    PDF --> OCR --> NORM --> CHUNK --> EMBED
-    EMBED --> STORE_S & STORE_Q & STORE_B
-    STORE_Q --> DENSE
-    STORE_B --> BM25
-    DENSE & BM25 --> RRF --> RERANK
+    PDF --> ROUTER
+    ROUTER --> TESS --> NORM
+    ROUTER --> TROCR --> NORM
+    NORM --> CHUNK --> EMBED
+    EMBED --> SQLITE & QDRANT & BM25
 
-    PAT_STORE --> PATS
-    EPI --> PLAN
-    PATS --> PLAN --> EXEC --> NLI --> EXEC
+    QDRANT --> DENSE
+    BM25 --> KW
+    DENSE & KW --> RRF --> RERANK --> GUARD
+
+    PAT_STORE --> PAT_RET
+    QDRANT --> EPI_RET
+    PAT_RET & EPI_RET --> PLAN --> DISPATCH --> EXEC
+    EXEC --> NLI --> EXEC
     EXEC --> CRIT
-    CRIT -- "weak sections, iter < 3" --> REF --> EXEC
+    CRIT -- "weak sections, iter < 3" --> REF --> DISPATCH
     CRIT -- "all pass or max iter" --> ASM --> TRACE
 
-    ASM --> EDIT --> CLASS --> EXTRACT --> DEDUP --> PAT_STORE
-    EDIT --> EPI
+    FEEDBACK --> CLASS --> EXTRACT --> DEDUP --> PAT_STORE
+    FEEDBACK --> EPI_WRITE
+    EXTRACT --> DPO
 ```
 
 ---
 
-## How the Learning Loop Works
-
-This is the system's core value proposition: it gets measurably better the more lawyers use it.
-
-### The before state
-
-A lawyer receives a generated draft that reads:
+## Ingestion Pipeline
 
 ```
-"If fired without cause, the employee gets 3x their yearly pay."
-```
-
-This sentence is technically accurate but legally inadequate. It uses colloquial language
-("fired", "gets", "yearly pay") where the contract uses precise defined terms. It omits
-the payment timeline. It doesn't cite the evidence it came from.
-
-### The edit
-
-The lawyer corrects it to:
-
-```
-"Upon termination without cause, Employee shall receive a lump sum equal to
-three (3) times Employee's Base Compensation, payable within fifteen (15)
-days of the Date of Termination [E1]."
-```
-
-They submit this via `POST /feedback`.
-
-### What happens next (automatically, in the background)
-
-**Step 1 — Edit classifier** (Groq Llama 3.3 70B, temperature=0):
-```json
-{
-  "edit_type": "terminology",
-  "scope": "sentence",
-  "rule": "Use precise legal phrasing for severance: 'lump sum equal to N times Base Compensation, payable within M days of the Date of Termination'",
-  "confidence": 0.87
-}
-```
-
-**Step 2 — Deduplication check**: The new rule is embedded and compared against all existing patterns in Qdrant. If cosine similarity ≥ 0.85 with an existing pattern, that pattern is *reinforced* (frequency++, confidence +0.05) instead of creating a duplicate. This keeps the pattern set clean and makes the frequency signal meaningful.
-
-**Step 3 — Pattern injected into the next draft**: On the next `POST /draft` call for a similar document type and query, the pattern retriever scores candidates using a composite formula that balances four signals:
-
-```
-composite_score = 0.40 × semantic_similarity
-                + 0.25 × pattern_confidence
-                + 0.20 × min(frequency / 10, 1.0)
-                + 0.15 × exp(−days_since_reinforced / 30)
-```
-
-The top patterns are injected into the Gemini prompt. The NLI-based adherence checker then verifies whether Gemini actually followed each one.
-
-### The measured result
-
-After 5 rounds of operator edits on a clean employment contract, average normalised Levenshtein distance between generated sections and operator-ideal text dropped by **59%** (0.691 → 0.283). The full trend is in `examples/outputs/edit_distance_trend.json`.
-
----
-
-## Hallucination Guards
-
-The system has two independent layers that prevent fabricated content from reaching users.
-
-**Layer 1 — Retrieval sufficiency gate**: The cross-encoder reranker assigns each candidate evidence chunk a relevance score against the query. If the best score is below 0.35, the pipeline returns `sufficient=False` — the executor writes `[INSUFFICIENT EVIDENCE: reason]` and returns a grounding score of 0.0. No generation proceeds on empty evidence.
-
-**Layer 2 — NLI grounding verification**: After generation, `nli-deberta-v3-small` (184M parameters, running locally) verifies each factual sentence against the evidence pool. Only sentences where the NLI model returns ENTAILMENT count as verified. NEUTRAL and CONTRADICTION sentences lower the grounding score.
-
-These two layers combined achieve **87.5% adversarial refusal precision** — 7 out of 8 deliberately off-topic queries are correctly refused without generating fabricated content.
-
----
-
-## Quick Start — Docker (recommended)
-
-> Prerequisites: Docker Desktop, a Gemini API key, a Groq API key. Everything else runs inside containers.
-
-```powershell
-git clone <repo-url>
-cd psl-system
-Copy-Item .env.example .env      # fill in GEMINI_API_KEY and GROQ_API_KEY
-.\bootstrap.ps1                  # builds images, starts stack, seeds demo data
-```
-
-`bootstrap.ps1` builds the images, waits for the API to pass its health check (ML models load in ~60–90 s on first start, faster on subsequent starts from the model cache volume), and runs the seed script to ingest an example employment contract and create starter patterns.
-
-| Service | URL |
-|---------|-----|
-| Streamlit UI | http://localhost:8501 |
-| FastAPI | http://localhost:8000 |
-| API docs (Swagger) | http://localhost:8000/docs |
-| Qdrant dashboard | http://localhost:6333/dashboard |
-
----
-
-## Quick Start — Local (no Docker for the app)
-
-> Prerequisites: Python 3.11+, Docker (for Qdrant), Tesseract OCR 5.x, Gemini API key, Groq API key.
-
-```powershell
-# 1. Clone and activate virtual environment
-git clone <repo-url>
-cd psl-system
-python -m venv .venv && .venv\Scripts\Activate.ps1
-
-# 2. Install Python dependencies
-pip install -r requirements.txt
-
-# 3. Configure environment — edit .env with your real API keys
-Copy-Item .env.example .env
-
-# 4. Start Qdrant vector database
-docker run -d -p 6333:6333 qdrant/qdrant
-
-# 5. Start the API server
-uvicorn python_service.main:app --reload
-
-# 6. Seed example data (separate terminal, API must be running)
-python -m scripts.generate_examples   # creates examples/inputs/ PDFs
-python -m scripts.seed                # ingests PDF, seeds 5 operator edits
-
-# 7. Start the Streamlit UI (separate terminal)
-streamlit run ui/app.py
+Input file
+    │
+    ▼
+┌─────────────────────────────────────────────────────┐
+│ File Router (ingestion/file_router.py)               │
+│                                                      │
+│  1. pypdf text extraction > 20 chars/page?           │
+│     YES → TEXT_LAYER: skip OCR entirely              │
+│                                                      │
+│  2. Tesseract confidence ≥ 0.35 on sample page?      │
+│     YES → TYPED_SCAN: Tesseract OCR                  │
+│                                                      │
+│  3. Neither of the above?                            │
+│     → HANDWRITING: TrOCR fallback                    │
+└─────────────────────────────────────────────────────┘
+    │
+    ▼
+Line normaliser (dehyphenation, ligature fix, spacing)
+    │
+    ▼
+┌─────────────────────────────────────────────────────┐
+│ Legal-structure chunker (chunking/legal_chunker.py)  │
+│                                                      │
+│  Heading pattern detection:                          │
+│    Article → Section → Clause → Sub-clause           │
+│                                                      │
+│  Every chunk carries a breadcrumb:                   │
+│    "Article 4 → Section 4.2 → Clause 4.2(b)"         │
+│                                                      │
+│  Target size: 400–600 tokens                         │
+│  Hard max:    800 tokens (split at sentence boundary)│
+└─────────────────────────────────────────────────────┘
+    │
+    ▼
+BAAI/bge-base-en-v1.5 embedding (768-dim)
+    │
+    ├──→ SQLite (Chunk rows with metadata)
+    ├──→ Qdrant legal_chunks collection
+    └──→ BM25 index (data/bm25/{document_id}.pkl)
 ```
 
 ---
 
-## Live Demo
+## Retrieval Pipeline
 
-The full stack is deployed on Render (free tier) with Qdrant Cloud as the vector database.
-
-| Service | URL |
-|---------|-----|
-| Streamlit UI | https://psl-ui.onrender.com |
-| FastAPI | https://psl-api.onrender.com |
-| API docs | https://psl-api.onrender.com/docs |
-
-> Render free-tier services sleep after 15 minutes of inactivity. First request after sleep takes ~30 s to wake; subsequent requests are fast.
-
-### Deploy your own copy
-
-**Option A — Render blueprint (one click)**
-
-1. Fork this repo, then sign up at [render.com](https://render.com) (free).
-2. Create a free Qdrant Cloud cluster at [cloud.qdrant.io](https://cloud.qdrant.io) — no credit card.
-3. In Render: **New → Blueprint** → connect your fork → `render.yaml` is auto-detected.
-4. Fill in: `GEMINI_API_KEY`, `GROQ_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`.
-5. After `psl-api` deploys, set `PSL_API_URL=https://psl-api.onrender.com` in the `psl-ui` service.
-6. Run the seed script once via the Render shell: `python -m scripts.seed`
-
-**Option B — Docker Compose**
-```powershell
-.\bootstrap.ps1
 ```
+Query string
+    │
+    ├──→ Qdrant ANN search (top-20 by cosine similarity)
+    │
+    └──→ BM25 keyword search (top-20 by Okapi BM25)
+              k1=1.5, b=0.75
+    │
+    ▼
+Reciprocal Rank Fusion
+    score(d) = Σ 1 / (k + rank_i(d)),  k=60
+    Chunks in both lists get significant boost
+    │
+    ▼
+Cross-encoder rerank
+    cross-encoder/ms-marco-MiniLM-L-6-v2
+    Joint (query, chunk) scoring → top-5
+    │
+    ▼
+Sufficiency guard
+    best_score ≥ 0.35 → proceed with [E1]–[E5]
+    best_score < 0.35 → return INSUFFICIENT_EVIDENCE
+                        no generation proceeds
+```
+
+BM25 is essential for legal documents. Terms like `"Section 4.2(b)"`, `"Base Compensation"`, or `"Date of Termination"` are defined terms that have exact-token match importance but may not be semantically similar to the query in embedding space. Dense-only retrieval misses these.
+
+---
+
+## Agentic Draft — LangGraph Graph
+
+```
+                    ┌─────────────────────────────────┐
+                    │  Pattern Retriever               │
+                    │  + Episodic Memory (3 sessions)  │
+                    └────────────────┬────────────────┘
+                                     │
+                                     ▼
+                             ┌──────────────┐
+                             │   Planner    │
+                             │  Gemini 2.5  │
+                             │  4–7 section │
+                             │  plans       │
+                             └──────┬───────┘
+                                    │  LangGraph Send (fan-out)
+                    ┌───────────────┼───────────────┐
+                    ▼               ▼               ▼
+             ┌──────────┐   ┌──────────┐   ┌──────────┐
+             │Executor 1│   │Executor 2│   │Executor N│
+             │section   │   │section   │   │section   │
+             │retrieval │   │retrieval │   │retrieval │
+             │+generate │   │+generate │   │+generate │
+             │+NLI check│   │+NLI check│   │+NLI check│
+             └────┬─────┘   └────┬─────┘   └────┬─────┘
+                  └──────────────┼───────────────┘
+                                 │  (fan-in via custom reducer)
+                                 ▼
+                          ┌─────────────┐
+                          │   Critic    │
+                          │             │
+                          │ UNGROUNDED  │◄── grounding_score < 0.50
+                          │ INCOMPLETE  │◄── length < 40 words or
+                          │             │    [INSUFFICIENT EVIDENCE]
+                          │ STYLE_VIOL  │◄── pattern CONTRADICTED
+                          └──────┬──────┘
+                                 │
+                   ┌─────────────┴─────────────┐
+                   │ weak sections exist        │ all pass OR iter ≥ 3
+                   ▼                            ▼
+            ┌─────────────┐           ┌──────────────────┐
+            │   Refiner   │           │    Assembler      │
+            │ improved    │           │ sort + average    │
+            │ retrieval   │           │ grounding score   │
+            │ queries     │           │ + Groq judge      │
+            └──────┬──────┘           │ + save Draft      │
+                   │                  │ + write Trace     │
+                   └──→ Dispatcher    └──────────────────┘
+                        (re-run weak
+                         sections only)
+```
+
+Max refinement iterations: 3. If sections are still weak after 3 rounds, the Assembler runs with whatever is passing — weak sections remain in output marked with LOW confidence.
+
+---
+
+## Hallucination Guard — Two Layers
+
+### Layer 1: Retrieval sufficiency gate
+
+If the best cross-encoder rerank score across all candidate evidence chunks is below `0.35`, the pipeline returns `INSUFFICIENT_EVIDENCE`. No LLM generation call is made. The executor writes `[INSUFFICIENT EVIDENCE: <reason>]` into the draft and records `grounding_score = 0.0`.
+
+### Layer 2: NLI grounding verification
+
+After generation, every factual sentence is verified against the evidence pool using `cross-encoder/nli-deberta-v3-small` (184 M parameters, runs locally on CPU).
+
+```
+For each sentence in draft section:
+    For each evidence chunk in [E1–E5]:
+        NLI model → ENTAILMENT / NEUTRAL / CONTRADICTION
+
+Grounding score = 1.0 − (contradictions / total_checked)
+
+Thresholds:
+    ≥ 0.75  HIGH   → deliver draft
+    0.50–0.74 MEDIUM → deliver with warnings list
+    < 0.50  LOW    → refuse delivery, return INSUFFICIENT_GROUNDING
+```
+
+Pure numeric values (dollar amounts, percentages, dates) are exempted — these are typically copy-through from evidence and are trivially grounded.
+
+---
+
+## Learning Loop — How Operator Edits Improve Future Drafts
+
+```
+Operator receives draft
+    │
+    │  "If fired without cause, the employee gets 3x their yearly pay."
+    │
+    ▼
+Operator corrects it:
+    │
+    │  "Upon termination without cause, Employee shall receive a lump
+    │   sum equal to three (3) times Employee's Base Compensation,
+    │   payable within fifteen (15) days of the Date of Termination [E1]."
+    │
+    ▼
+POST /feedback  →  BackgroundTask: process_edit()
+    │
+    ├──→ Edit classifier (Groq Llama 3.3 70B, temperature=0)
+    │    {
+    │      "edit_type": "terminology",
+    │      "scope": "sentence",
+    │      "rule": "Use precise legal phrasing for severance terms",
+    │      "confidence": 0.0–1.0
+    │    }
+    │
+    ├──→ Pattern extractor (Groq)
+    │    Generalised before/after pair, not document-specific
+    │
+    ├──→ Deduplication check (Qdrant cosine similarity)
+    │    ≥ 0.85 match → REINFORCE existing pattern
+    │                    frequency++, confidence + 0.05
+    │    < 0.85 match → INSERT new pattern
+    │
+    ├──→ Pattern stored in SQLite + Qdrant learned_patterns
+    │
+    └──→ DPO preference data emitted to data/preferences.jsonl
+         {chosen: edited_text, rejected: original_text, context: ...}
+
+On next POST /draft for similar document type:
+    │
+    ├──→ Pattern retriever scores candidates:
+    │    composite = 0.40 × semantic_similarity
+    │              + 0.25 × confidence
+    │              + 0.20 × min(frequency / 10, 1.0)
+    │              + 0.15 × exp(−days_since_reinforced / 30)
+    │
+    └──→ Top patterns injected into Gemini prompt
+         Adherence checker verifies Gemini followed each one
+```
+
+---
+
+## Data Model
+
+```
+Document          — one per uploaded file
+  └─ Chunk (1:N) — one per structural text segment (legal-structure-aware)
+
+Draft             — one per /draft call
+  └─ Edit (1:N)  — operator corrections, each linked to a section
+
+Pattern           — generalised rule from one or more edits
+  └─ PatternVersion (1:N) — immutable audit trail of every update
+
+EpisodicMemory    — one per feedback session; quality metrics for the planner
+Trace             — one per /draft call; timing breakdown by pipeline stage
+  └─ TraceStage (1:N) — wall-clock duration + metadata for each step
+```
+
+All relational data in SQLite via SQLModel. Vectors in Qdrant (three collections):
+- `legal_chunks` — document chunk embeddings (768-dim, BAAI/bge-base-en-v1.5)
+- `learned_patterns` — pattern rule embeddings (same model, 768-dim)
+- `episodic_memory` — session-level embeddings for retrieval-strategy learning
 
 ---
 
@@ -255,111 +354,225 @@ The full stack is deployed on Render (free tier) with Qdrant Cloud as the vector
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/health` | Liveness check + config summary |
-| POST | `/upload` | Upload PDF or image, start ingestion pipeline |
-| GET | `/job/{id}` | Poll ingestion pipeline progress |
-| GET | `/documents` | List all ingested documents |
-| POST | `/query` | Hybrid evidence retrieval (BM25 + dense + rerank) |
-| POST | `/draft` | Agentic draft: planner → parallel executors → critic loop → assembler |
-| POST | `/draft/stream` | Same as `/draft` but streams SSE events as each section completes |
-| POST | `/feedback` | Submit operator edits — triggers pattern extraction in background |
-| GET | `/patterns` | List all learned patterns with frequency and confidence |
-| GET | `/patterns/{id}/impact` | Analytics for one pattern: drafts applied, avg judge score, consensus |
-| GET | `/metrics` | System-wide counts and average quality scores |
-| GET | `/evaluation/improvement-report` | Before/after delta showing learning loop improvement |
-| GET | `/traces` | List recent pipeline audit traces |
-| GET | `/traces/{id}` | Full trace: per-stage timing, agent node sequence, per-section grounding |
+| `GET` | `/health` | Liveness check + Qdrant connectivity status |
+| `POST` | `/upload` | Upload PDF or image; returns `job_id` |
+| `GET` | `/job/{id}` | Poll ingestion progress (PENDING / RUNNING / DONE / FAILED) |
+| `GET` | `/documents` | List all ingested documents |
+| `POST` | `/query` | Hybrid evidence retrieval — returns top-5 evidence chunks |
+| `POST` | `/draft` | Full agentic draft: planner → executors → critic loop → assembler |
+| `POST` | `/draft/stream` | Same as `/draft` but streams SSE events per section as it completes |
+| `POST` | `/feedback` | Submit operator edits — triggers pattern extraction in background |
+| `GET` | `/patterns` | List learned patterns with frequency, confidence, and last-reinforced date |
+| `GET` | `/patterns/{id}/impact` | Per-pattern analytics: drafts applied, avg judge score, operator consensus |
+| `GET` | `/metrics` | System-wide document/draft/pattern counts and average quality scores |
+| `GET` | `/evaluation/improvement-report` | Before/after delta: baseline drafts vs pattern-assisted drafts |
+| `GET` | `/traces` | List recent pipeline audit traces |
+| `GET` | `/traces/{id}` | Full trace: per-stage timing, agent node sequence, per-section grounding |
 
-Full interactive docs: http://localhost:8000/docs
+Interactive docs available at `http://localhost:8000/docs` when running.
 
 ---
 
-## Evaluation Scripts
+## Quick Start — Docker (recommended)
 
-All scripts support `--dry-run` (synthetic data, no server needed) and save JSON results to `examples/outputs/`.
+**Prerequisites:** Docker Desktop, a Gemini API key, a Groq API key.
 
 ```powershell
-# Does the system refuse off-topic queries? (target: ≥80% refusal precision)
-python -m scripts.adversarial_eval --dry-run
+git clone <repo-url>
+cd psl-system
 
-# Does retrieval find known facts in top-3 evidence? (target: ≥75% precision@3)
-python -m scripts.known_fact_eval --dry-run
+# Copy environment template and fill in your keys
+Copy-Item .env.example .env
+# Edit .env: set GEMINI_API_KEY and GROQ_API_KEY
 
-# Is the LLM judge consistent across prompt phrasings? (target: κ ≥ 0.60)
-python -m scripts.judge_tournament --dry-run
-
-# Does the edit-distance converge over rounds? (shows 59% reduction)
-python -m scripts.edit_distance_trend --dry-run
-
-# Causal A/B proof: do patterns causally improve quality? (Welch t-test, Cohen's d)
-python -m scripts.ab_test --dry-run
+# Build images, start Qdrant + API + UI, wait for health, seed example data
+.\bootstrap.ps1
 ```
+
+`bootstrap.ps1` builds the containers, polls the API health endpoint until the service is ready (ML models load in 60–90 s on first start), then runs the seed script.
+
+| Service | URL |
+|---------|-----|
+| Streamlit UI | http://localhost:8501 |
+| FastAPI | http://localhost:8000 |
+| Swagger docs | http://localhost:8000/docs |
+| Qdrant dashboard | http://localhost:6333/dashboard |
 
 ---
 
-## Verifying the Learning Loop
+## Quick Start — Local (no Docker for the app)
 
-The fastest way to see the learning loop in action:
+**Prerequisites:** Python 3.11+, Docker (for Qdrant only), Tesseract OCR 5.x, API keys.
 
 ```powershell
-# Step 1: Ingest example document and generate a baseline draft
-python -m scripts.seed   # auto-runs if no documents exist
+# 1. Clone and create virtual environment
+git clone <repo-url>
+cd psl-system
+python -m venv .venv
+.venv\Scripts\Activate.ps1
 
-# Step 2: Check the improvement report — judge scores should be higher in the "after" cohort
-Invoke-RestMethod http://localhost:8000/evaluation/improvement-report
+# 2. Install dependencies
+pip install -r requirements.txt
 
-# Step 3: Check learned patterns
-Invoke-RestMethod http://localhost:8000/patterns
+# 3. Configure environment
+Copy-Item .env.example .env
+# Edit .env: fill in GEMINI_API_KEY and GROQ_API_KEY
 
-# Step 4: Generate a new draft — patterns are now injected
-$body = @{document_id="<from step 1>"; query="Summarize compensation and termination"} | ConvertTo-Json
-$draft = Invoke-RestMethod -Method POST -Uri http://localhost:8000/draft `
-         -ContentType "application/json" -Body $body
+# 4. Start Qdrant (vector database only)
+docker run -d -p 6333:6333 qdrant/qdrant
 
-# Step 5: Inspect the agent trace — shows per-section grounding, refinement iterations
-Invoke-RestMethod "http://localhost:8000/traces/$($draft.trace_id)"
+# 5. Start the API
+uvicorn python_service.main:app --reload
+
+# 6. In a second terminal: seed example data
+python -m scripts.generate_examples   # generates PDFs in examples/inputs/
+python -m scripts.seed                # ingests PDF, creates starter patterns
+
+# 7. In a third terminal: start the UI
+streamlit run ui/app.py
 ```
 
 ---
 
-## Setup
+## Environment Variables
 
-**Prerequisites**
+Copy `.env.example` to `.env` and fill in:
 
-| Requirement | Version | Notes |
-|------------|---------|-------|
-| Python | 3.11+ | Only needed for local (non-Docker) setup |
-| Tesseract OCR | 5.x | Windows: [UB-Mannheim installer](https://github.com/UB-Mannheim/tesseract/wiki). Not needed when using Docker. |
-| Docker Desktop | any | For Qdrant (local) or full stack (bootstrap.ps1) |
-| Gemini API key | — | [Google AI Studio](https://aistudio.google.com/app/apikey) — free tier: 1,500 req/day |
-| Groq API key | — | [console.groq.com](https://console.groq.com) — free tier available |
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GEMINI_API_KEY` | Yes | Gemini 2.5 Flash for planning and generation |
+| `GROQ_API_KEY` | Yes | Llama 3.3 70B for classification, judging, and pattern extraction |
+| `QDRANT_URL` | Yes | Vector DB URL — `http://localhost:6333` for local Docker |
+| `QDRANT_API_KEY` | Cloud only | Required for Qdrant Cloud; leave empty for local |
+| `TESSERACT_CMD` | Yes (local) | Path to Tesseract binary. Not needed when using Docker. |
+| `DATABASE_URL` | No | Defaults to `sqlite:///./data/psl.db` |
+| `LANGFUSE_PUBLIC_KEY` | No | Optional Langfuse observability — omit to disable |
 
-**Environment variables** (copy `.env.example` → `.env`)
-
-```bash
-GEMINI_API_KEY=your_key          # required — Gemini 2.5 Flash for generation
-GROQ_API_KEY=your_key            # required — Llama 3.3 70B for classification + judging
-QDRANT_URL=http://localhost:6333  # local Docker default
-QDRANT_API_KEY=                  # only needed for Qdrant Cloud
-TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe  # Windows default
-```
+API keys for both Gemini and Groq have free tiers sufficient for development (Gemini: 1,500 req/day; Groq: generous free tier).
 
 ---
 
 ## Example Files
 
-| File | Description |
-|------|-------------|
-| `examples/inputs/clean_contract.pdf` | Employment agreement (Pearson Specter Litt × Harvey Specter) — clean text layer |
-| `examples/inputs/messy_scan.pdf` | Lease agreement — image-only pages (exercises full OCR path) |
-| `examples/inputs/mixed_quality.pdf` | NDA — page 1 clean text, page 2 image-based (mixed pipeline) |
-| `examples/outputs/draft_baseline.json` | Draft generated with zero learned patterns |
-| `examples/outputs/draft_improved.json` | Draft generated after 3 patterns applied |
-| `examples/outputs/improvement_report.json` | Before/after judge-score delta |
-| `examples/outputs/edit_distance_trend.json` | Edit-distance convergence across 5 rounds (59% reduction) |
-| `examples/outputs/adversarial_eval.json` | Adversarial refusal precision results |
-| `examples/outputs/known_fact_eval.json` | Retrieval precision@3 results |
-| `examples/outputs/ab_test_results.json` | A/B causal proof: patterns vs no-patterns |
+### Inputs (examples/inputs/)
+
+| File | What it exercises |
+|------|-------------------|
+| `clean_contract.pdf` | Employment agreement — has text layer, skips OCR |
+| `messy_scan.pdf` | Lease agreement — image-only pages, exercises Tesseract path |
+| `mixed_quality.pdf` | NDA — page 1 has text layer, page 2 is image-based |
+| `real_employment_agreement.pdf` | Real employment contract, mixed formatting |
+| `bailey_v_philaport_employment.pdf` | Case document — structured legal filing |
+| `gardner_v_royalton_records.pdf` | Records dispute — dense paragraph formatting |
+| `jules_v_balazs_*.pdf` | Multi-document set: petition, briefs, circuit opinion, Supreme Court opinion |
+
+### Outputs (examples/outputs/)
+
+| File | Contents |
+|------|----------|
+| `draft_baseline.json` | Draft generated with zero learned patterns |
+| `draft_improved.json` | Draft generated after patterns applied |
+| `improvement_report.json` | Before/after judge-score comparison |
+| `edit_distance_trend.json` | Edit-distance convergence across 5 simulated rounds |
+| `adversarial_eval.json` | Refusal precision results — off-topic queries |
+| `known_fact_eval.json` | Retrieval precision@3 — known structured facts |
+| `judge_tournament.json` | Inter-rater kappa — judge consistency across prompt phrasings |
+
+---
+
+## Evaluation Scripts
+
+All scripts support `--dry-run` (runs on synthetic data without a server) and write JSON results to `examples/outputs/`.
+
+```powershell
+# Adversarial refusal: does the system refuse off-topic queries?
+python -m scripts.adversarial_eval --dry-run
+
+# Retrieval precision: are known facts found in top-3 evidence?
+python -m scripts.known_fact_eval --dry-run
+
+# Judge consistency: is the LLM judge stable across prompt phrasings?
+python -m scripts.judge_tournament --dry-run
+
+# Learning convergence: does edit-distance decrease across rounds?
+python -m scripts.edit_distance_trend --dry-run
+
+# A/B causal proof: do patterns cause quality improvement?
+python -m scripts.ab_test --dry-run
+```
+
+> `--dry-run` uses synthetic data and produces illustrative results. Live evaluation requires the API server and Qdrant running, plus real documents ingested via `scripts/seed.py`.
+
+---
+
+## Tests
+
+```powershell
+pytest tests/
+```
+
+| File | What it covers |
+|------|---------------|
+| `tests/test_chunker.py` | 10 unit tests — legal-structure chunker, heading detection, breadcrumb generation |
+| `tests/test_classifier.py` | 7 unit tests — edit classifier schema validation and edge cases |
+
+---
+
+## Verifying the Learning Loop
+
+```powershell
+# 1. Ingest example document and seed starter patterns
+python -m scripts.seed
+
+# 2. Check the improvement report
+Invoke-RestMethod http://localhost:8000/evaluation/improvement-report
+
+# 3. Check which patterns have been learned
+Invoke-RestMethod http://localhost:8000/patterns
+
+# 4. Generate a draft — patterns are injected automatically
+$body = @{document_id="<id from step 1>"; query="Summarize compensation and termination"} | ConvertTo-Json
+$draft = Invoke-RestMethod -Method POST -Uri http://localhost:8000/draft `
+         -ContentType "application/json" -Body $body
+
+# 5. Inspect the full agent trace — per-section grounding, patterns used, timing
+Invoke-RestMethod "http://localhost:8000/traces/$($draft.trace_id)"
+```
+
+---
+
+## Deploy to Render
+
+A `render.yaml` Blueprint is included. Deploy with:
+
+1. Fork this repo.
+2. Create a free Qdrant Cloud cluster at [cloud.qdrant.io](https://cloud.qdrant.io).
+3. In Render: **New → Blueprint** → connect fork → `render.yaml` is auto-detected.
+4. Set: `GEMINI_API_KEY`, `GROQ_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`.
+5. After `psl-api` deploys, set `PSL_API_URL=https://psl-api.onrender.com` in the `psl-ui` service env.
+6. Run seed once via Render shell: `python -m scripts.seed`
+
+---
+
+## Latency Profile
+
+Measured on a development machine (CPU-only inference, no GPU).
+
+| Step | Typical range |
+|------|---------------|
+| Ingestion — text-layer PDF, per page | 1–3 s |
+| Ingestion — typed scan (Tesseract), per page | 8–15 s |
+| Ingestion — handwriting (TrOCR), per page | 25–40 s |
+| Dense retrieval (Qdrant ANN) | 20–50 ms |
+| BM25 retrieval (pickled index) | 10–30 ms |
+| Cross-encoder rerank (20 candidates) | 100–200 ms |
+| NLI grounding check (per sentence) | 40–80 ms |
+| Gemini generation (one section, API) | 2–5 s |
+| Groq judge (API) | 1–3 s |
+| Full `/draft` — 5 sections, no refinement | 15–30 s |
+| Full `/draft` — with one refinement round | 25–45 s |
+
+The dominant cost is LLM API calls. All local ML inference (embedder, NLI, reranker) adds roughly 500 ms total per draft. A GPU would reduce local inference to negligible but would not meaningfully change end-to-end latency.
 
 ---
 
@@ -368,54 +581,83 @@ TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe  # Windows default
 ```
 psl-system/
 ├── python_service/
-│   ├── main.py                  # FastAPI app + all routes
-│   ├── config.py                # Pydantic settings (GEMINI, GROQ, QDRANT, etc.)
-│   ├── tracing.py               # TraceBuilder — per-stage timing audit
-│   ├── db/                      # SQLite models (Document, Chunk, Draft, Pattern,
-│   │                            #   EpisodicMemory, PatternVersion, Trace)
-│   ├── ocr/                     # Tesseract OCR + TrOCR handwriting fallback
-│   ├── ingestion/               # File routing → normalise → chunk → embed → store
-│   ├── chunking/                # Legal-structure-aware chunker (Article/Section/Clause)
-│   ├── embedder.py              # BAAI/bge-base-en-v1.5 (768-dim)
-│   ├── vector/                  # Qdrant collections: chunks, patterns, episodic memory
-│   ├── retrieval/               # BM25 + dense → RRF → cross-encoder rerank → guard
-│   ├── nli/                     # DeBERTa NLI grounding verifier (~50 ms/sentence)
-│   ├── generation/              # Gemini prompt builder + NLI grounding check
-│   ├── edit_loop/               # Capture edits → classify → extract pattern → dedup
-│   ├── evaluation/              # Judge (Groq), adherence checker (NLI), improvement report
+│   ├── main.py                  # FastAPI app, all 24 routes
+│   ├── config.py                # Pydantic settings — one place for all config
+│   ├── tracing.py               # TraceBuilder — per-stage wall-clock audit
+│   ├── jobs.py                  # In-memory job store for background ingestion
+│   ├── db/
+│   │   ├── models.py            # SQLModel table definitions
+│   │   └── session.py           # Engine + create_db_and_tables()
+│   ├── ocr/
+│   │   ├── handler.py           # Routes to correct OCR backend
+│   │   ├── tesseract_backend.py # Tesseract 5.x with confidence scores
+│   │   └── trocr_backend.py     # TrOCR handwriting fallback
+│   ├── ingestion/
+│   │   ├── pipeline.py          # End-to-end ingestion orchestration
+│   │   ├── file_router.py       # text-layer / typed-scan / handwriting routing
+│   │   └── line_normalizer.py   # Deterministic Tesseract noise cleanup
+│   ├── chunking/
+│   │   └── legal_chunker.py     # Article → Section → Clause chunker + breadcrumbs
+│   ├── embedder.py              # BAAI/bge-base-en-v1.5 singleton
+│   ├── vector/
+│   │   └── qdrant_store.py      # Collection creation + upsert helpers
+│   ├── retrieval/
+│   │   ├── dense.py             # Qdrant ANN search
+│   │   ├── bm25_index.py        # BM25 build + query
+│   │   ├── rrf.py               # Reciprocal Rank Fusion
+│   │   ├── reranker.py          # Cross-encoder rerank + sufficiency gate
+│   │   ├── hybrid.py            # Orchestrates all retrieval stages
+│   │   └── evidence.py          # Package evidence into [E1]–[E5] format
+│   ├── nli/                     # DeBERTa NLI wrapper (~50 ms/sentence on CPU)
+│   ├── generation/              # Gemini prompt builder + grounding check
+│   ├── edit_loop/
+│   │   ├── capture.py           # Store edits from POST /feedback
+│   │   ├── classifier.py        # Groq edit classification
+│   │   ├── pattern_extractor.py # Groq generalised rule extraction
+│   │   ├── pattern_retriever.py # Composite-score pattern retrieval
+│   │   └── processor.py         # Dedup + insert/reinforce pattern
+│   ├── evaluation/
+│   │   ├── adherence_checker.py # NLI check: did Gemini follow injected patterns?
+│   │   ├── draft_judge.py       # Groq 4-dimension judge (1–10 scoring)
+│   │   ├── improvement_validator.py # Before/after delta computation
+│   │   └── pattern_quality_gate.py  # Confidence + dedup gates
 │   ├── observability/           # Langfuse @observe decorators (no-op if keys absent)
-│   └── agent/                   # LangGraph: planner→executors→critic→refiner→assembler
-│       ├── state.py             # DraftingState TypedDict + custom reducer
-│       ├── graph.py             # Compiled StateGraph singleton
-│       └── nodes/               # One file per node: planner, executor, critic,
-│                                #   refiner, dispatcher, assembler
+│   └── agent/
+│       ├── state.py             # DraftingState TypedDict + custom fan-in reducer
+│       ├── graph.py             # Compiled LangGraph StateGraph singleton
+│       └── nodes/
+│           ├── planner.py       # Gemini: decompose query into SectionPlan objects
+│           ├── dispatcher.py    # LangGraph Send fan-out
+│           ├── executor.py      # One section: retrieve + generate + NLI check
+│           ├── critic.py        # Identify weak sections by grounding / completeness / style
+│           ├── refiner.py       # Gemini: improved retrieval_query for weak sections
+│           └── assembler.py     # Assemble + judge + save + trace
 ├── ui/
 │   └── app.py                   # Streamlit browser UI (PSL_API_URL configurable)
 ├── tests/
-│   ├── test_chunker.py          # 10 unit tests for legal structure chunker
-│   └── test_classifier.py       # 7 unit tests for edit classifier
+│   ├── test_chunker.py          # 10 unit tests
+│   └── test_classifier.py       # 7 unit tests
 ├── scripts/
-│   ├── seed.py                  # Self-bootstrapping: ingest → baseline draft → seed edits → improved draft
+│   ├── seed.py                  # Ingest → baseline draft → seed edits → improved draft
 │   ├── generate_examples.py     # Create example PDFs (fpdf2 + Pillow)
-│   ├── edit_distance_trend.py   # Measure learning-loop convergence (--dry-run)
-│   ├── ab_test.py               # A/B causal proof with Welch t-test + Cohen's d
-│   ├── prune_patterns.py        # Archive stale patterns (freq=1, age > 60d)
-│   ├── adversarial_eval.py      # Refusal precision: off-topic queries refused?
-│   ├── known_fact_eval.py       # Retrieval precision@3: known facts surfaced?
-│   └── judge_tournament.py      # Inter-rater kappa: judge consistent across personas?
+│   ├── edit_distance_trend.py   # Learning convergence measurement
+│   ├── ab_test.py               # A/B causal proof (Welch t-test + Cohen's d)
+│   ├── adversarial_eval.py      # Refusal precision evaluation
+│   ├── known_fact_eval.py       # Retrieval precision@3 evaluation
+│   ├── judge_tournament.py      # Inter-rater kappa evaluation
+│   └── prune_patterns.py        # Archive stale patterns (freq=1, age > 60d)
 ├── examples/
-│   ├── inputs/                  # Example PDF inputs
-│   └── outputs/                 # Example JSON outputs and evaluation results
-├── Dockerfile.api               # FastAPI container: python:3.11-slim + tesseract-ocr
-├── Dockerfile.ui                # Streamlit container: python:3.11-slim + streamlit only
-├── docker-compose.yml           # Full stack: qdrant + api + ui, named volumes
-├── bootstrap.ps1                # One-command: compose up → health wait → seed
+│   ├── inputs/                  # Sample PDF inputs (12 files)
+│   └── outputs/                 # Sample JSON outputs and evaluation results
+├── Dockerfile.api               # python:3.11-slim + tesseract-ocr
+├── Dockerfile.ui                # python:3.11-slim + streamlit
+├── docker-compose.yml           # qdrant + api + ui with named volumes
+├── bootstrap.ps1                # One command: compose up → health wait → seed
 ├── render.yaml                  # Render Blueprint for cloud deployment
 ├── requirements.txt             # Full Python dependencies
-├── requirements-ui.txt          # UI-only deps (used by Dockerfile.ui)
-├── EVALUATION.md                # Methodology + measurements for every metric
-├── ARCHITECTURE.md              # Deep technical architecture walkthrough
-├── DESIGN_DECISIONS.md          # ADR-style records for 10 key design choices
+├── requirements-ui.txt          # UI-only deps (Dockerfile.ui)
+├── ARCHITECTURE.md              # Deep technical walkthrough of all four pillars
+├── EVALUATION.md                # Evaluation methodology and measurement approach
 └── .env.example                 # Environment variable template
 ```
 
@@ -423,14 +665,14 @@ psl-system/
 
 ## Known Limitations
 
-1. **NLI is coarse-grained at the sentence level.** `nli-deberta-v3-small` evaluates sentences against the full evidence pool. Legal documents sometimes require cross-sentence reasoning that a sentence-level model misses, leading to an ENTAILMENT verdict for sentences that are subtly wrong. A larger NLI model or a chain-of-thought verifier would close this gap.
+1. **NLI is sentence-level, not cross-sentence.** `nli-deberta-v3-small` checks each sentence against the evidence pool independently. Legal conclusions that require chaining across two evidence chunks may be labelled NEUTRAL even when the combined inference is correct. A larger model or chain-of-thought verifier would close this gap.
 
-2. **CPU-only inference.** All local models (embedder, NLI, reranker, TrOCR) run on CPU. Ingestion takes 8–15 s/page on a modern laptop. Adding a GPU cuts this by ~10×.
+2. **CPU-only inference.** All local models (embedder, NLI, reranker, TrOCR) run on CPU. Ingestion is 8–15 s/page for scanned documents. A GPU cuts this by roughly 10×.
 
-3. **SQLite is single-writer.** Concurrent draft requests queue behind each other at the database layer. For multi-user production use, swap SQLite for PostgreSQL — the SQLModel ORM makes this a one-line change in `config.py`.
+3. **SQLite is single-writer.** Concurrent `/draft` requests queue behind each other. For multi-user production use, set `DATABASE_URL` to a PostgreSQL connection string — the SQLModel ORM requires no other code changes.
 
-4. **Pattern retrieval degrades gracefully when Qdrant is unreachable.** If Qdrant is down, the pattern retriever returns an empty list and the draft generates without learned patterns. The `GET /health` endpoint surfaces Qdrant connectivity status.
+4. **Pattern retrieval degrades gracefully when Qdrant is unreachable.** Drafts still generate; they just do not receive learned patterns. `GET /health` surfaces Qdrant status.
 
-5. **Dry-run evaluation numbers are synthetic.** The numbers in `edit_distance_trend.json`, `adversarial_eval.json`, and `ab_test_results.json` come from the `--dry-run` simulations. Live numbers require real documents and a running server. The simulations use realistic distributions that match observed live behaviour.
+5. **OCR quality degrades below 150 DPI.** Very low-resolution scans produce low Tesseract confidence. Affected chunks are annotated with `[LOW_CONF:0.xx]` and displayed with warning indicators in the UI. TrOCR fallback triggers automatically when confidence < 0.35 but cannot fully recover very degraded scans.
 
-6. **OCR degrades below 150 DPI.** Very low-resolution scans produce low Tesseract confidence scores. Affected chunks get `[LOW_CONF:0.xx]` annotations which the UI surfaces as ⚠ icons. TrOCR fallback triggers automatically when Tesseract confidence < 0.35.
+6. **Evaluation scripts use synthetic data in `--dry-run` mode.** Live evaluation requires a running server, Qdrant, and real documents. The dry-run results in `examples/outputs/` illustrate the expected trend; they are clearly labelled as simulated.

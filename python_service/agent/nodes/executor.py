@@ -81,7 +81,9 @@ def _build_pattern_block(patterns: list[dict]) -> str:
         return ""
     lines = [_PATTERN_BLOCK_HEADER]
     for i, p in enumerate(patterns[:5], start=1):   # cap at 5 most relevant
-        lines.append(f"  {i}. [{p.get('rule_type','style').upper()}] {p.get('description','')}")
+        # Handle both snake_case (rule_type) and camelCase (ruleType) keys
+        rule = p.get("rule_type") or p.get("ruleType") or "style"
+        lines.append(f"  {i}. [{rule.upper()}] {p.get('description','')}")
     return "\n".join(lines)
 
 
@@ -103,7 +105,7 @@ def _build_evidence_block(evidence_items) -> tuple[str, dict]:
 
 
 @observe(name="groq-executor-section")
-def _call_gemini_for_section(prompt: str) -> dict:
+def _call_groq_for_section(prompt: str) -> dict:
     """Call Groq Llama 3.3 70B in JSON mode for one section."""
     if not settings.groq_api_key:
         raise RuntimeError("GROQ_API_KEY not set in .env")
@@ -182,9 +184,9 @@ def executor_node(state: DraftingState) -> dict:
     )
 
     try:
-        raw = _call_gemini_for_section(prompt)
+        raw = _call_groq_for_section(prompt)
     except (json.JSONDecodeError, Exception) as exc:
-        logger.error("Executor [%s]: Gemini failed: %s", section_id, exc)
+        logger.error("Executor [%s]: Groq call failed: %s", section_id, exc)
         raw = {
             "section_id":    section_id,
             "title":         title,
