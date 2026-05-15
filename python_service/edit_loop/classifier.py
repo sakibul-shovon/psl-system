@@ -23,6 +23,7 @@ Why 70B and not 8B?
 
 import json
 import logging
+import time
 from typing import Optional
 
 from groq import Groq
@@ -31,6 +32,9 @@ from python_service.config import settings
 from python_service.observability.langfuse_client import observe
 
 logger = logging.getLogger(__name__)
+
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 8
 
 EDIT_TYPES = [
     "TERMINOLOGY_CHANGE",
@@ -98,33 +102,43 @@ def classify_edit(original_text: str, edited_text: str) -> dict:
         edited=edited_text[:1500],
     )
 
-    try:
-        client = _get_client()
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=256,
-            response_format={"type": "json_object"},
-        )
-        result = json.loads(response.choices[0].message.content)
+    for attempt in range(_MAX_RETRIES):
+        try:
+            client = _get_client()
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=256,
+                response_format={"type": "json_object"},
+            )
+            result = json.loads(response.choices[0].message.content)
 
-        edit_type = result.get("edit_type", "NOISE")
-        if edit_type not in EDIT_TYPES:
-            edit_type = "NOISE"
+            edit_type = result.get("edit_type", "NOISE")
+            if edit_type not in EDIT_TYPES:
+                edit_type = "NOISE"
 
-        logger.info(
-            "Classified edit as %s (confidence=%.2f): %s",
-            edit_type,
-            result.get("confidence", 0),
-            result.get("reasoning", ""),
-        )
-        return {
-            "edit_type": edit_type,
-            "confidence": float(result.get("confidence", 0.5)),
-            "reasoning": result.get("reasoning", ""),
-        }
+            logger.info(
+                "Classified edit as %s (confidence=%.2f): %s",
+                edit_type,
+                result.get("confidence", 0),
+                result.get("reasoning", ""),
+            )
+            return {
+                "edit_type": edit_type,
+                "confidence": float(result.get("confidence", 0.5)),
+                "reasoning": result.get("reasoning", ""),
+            }
 
-    except Exception as exc:
-        logger.error("Edit classification failed: %s", exc)
-        return {"edit_type": "NOISE", "confidence": 0.0, "reasoning": f"Error: {exc}"}
+        except Exception as exc:
+            err = str(exc)
+            if ("429" in err or "rate" in err.lower()) and attempt < _MAX_RETRIES - 1:
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    "Classifier rate-limited (attempt %d/%d) — retrying in %ds",
+                    attempt + 1, _MAX_RETRIES, delay,
+                )
+                time.sleep(delay)
+                continue
+            logger.error("Edit classification failed: %s", exc)
+            return {"edit_type": "NOISE", "confidence": 0.0, "reasoning": f"Error: {exc}"}

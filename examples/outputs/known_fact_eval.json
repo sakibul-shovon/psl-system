@@ -1,11 +1,11 @@
 {
   "total_cases": 7,
-  "hits": 6,
-  "misses": 1,
-  "precision_at_3": 0.8571,
-  "grade": "GOOD",
+  "hits": 0,
+  "misses": 7,
+  "precision_at_3": 0.0,
+  "grade": "POOR",
   "target_precision_at_3": 0.75,
-  "met_target": true,
+  "met_target": false,
   "methodology": "For each query, the draft pipeline is invoked. A 'hit' = expected_substring found in evidence_map content (raw chunk text) from any of the returned sections. Fallback: check generated section text (lower confidence).",
   "results": [
     {
@@ -13,36 +13,40 @@
       "description": "Employee name",
       "query": "Who are the parties to this employment agreement?",
       "expected": "Harvey Reginald Specter",
-      "hit": true,
-      "location": "evidence E1 in section 'Compensation'",
-      "synthetic": true
+      "hit": false,
+      "location": "not found",
+      "draft_id": "7949cd0f-1940-4ce2-bfbb-526ee413a9b5",
+      "grounding_score": 0.0
     },
     {
       "case_num": 2,
       "description": "Firm name",
       "query": "What law firm is party to this agreement?",
       "expected": "Pearson Specter Litt",
-      "hit": true,
-      "location": "evidence E1 in section 'Compensation'",
-      "synthetic": true
+      "hit": false,
+      "location": "not found",
+      "draft_id": "86d23d54-c6f9-454b-ae19-bb3ded762b65",
+      "grounding_score": 1.0
     },
     {
       "case_num": 3,
       "description": "Base salary amount",
       "query": "What is the annual base salary specified in this agreement?",
       "expected": "800,000",
-      "hit": true,
-      "location": "evidence E1 in section 'Compensation'",
-      "synthetic": true
+      "hit": false,
+      "location": "not found",
+      "draft_id": "e789e082-0a72-4696-a3aa-0276e9c5f0bb",
+      "grounding_score": 1.0
     },
     {
       "case_num": 4,
       "description": "Effective date",
       "query": "What is the effective date of this employment agreement?",
       "expected": "January 1, 2025",
-      "hit": true,
-      "location": "evidence E1 in section 'Compensation'",
-      "synthetic": true
+      "hit": false,
+      "location": "not found",
+      "draft_id": "0a7ad4b8-dcd8-46cf-a2c7-bd2ee1b8165d",
+      "grounding_score": 1.0
     },
     {
       "case_num": 5,
@@ -51,26 +55,29 @@
       "expected": "fifteen percent",
       "hit": false,
       "location": "not found",
-      "synthetic": true
+      "draft_id": "26945a56-1920-452a-bef3-9c13dcdb6111",
+      "grounding_score": 1.0
     },
     {
       "case_num": 6,
       "description": "Non-solicitation period",
       "query": "What are the non-solicitation obligations after termination?",
       "expected": "two (2) years",
-      "hit": true,
-      "location": "evidence E1 in section 'Compensation'",
-      "synthetic": true
+      "hit": false,
+      "location": "not found",
+      "draft_id": "73f21787-c0ca-4200-8119-617b8c14e4ef",
+      "grounding_score": 1.0
     },
     {
       "case_num": 7,
       "description": "Governing law jurisdiction",
       "query": "What is the governing law and dispute resolution method?",
       "expected": "New York",
-      "hit": true,
-      "location": "evidence E1 in section 'Compensation'",
-      "synthetic": true
+      "hit": false,
+      "location": "not found",
+      "draft_id": "e5319af7-919d-42c3-9e78-3e95297e86b3",
+      "grounding_score": 0.0
     }
   ],
-  "dry_run": true
+  "dry_run": false
 }

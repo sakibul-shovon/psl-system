@@ -116,12 +116,14 @@ def assembler_node(state: DraftingState) -> dict:
     draft_id = str(uuid.uuid4())
     applied_pattern_ids = [p["pattern_id"] for p in patterns]
 
+    draft_title = f"{document_title} — {query[:60]}" if document_title else query[:80]
+
     with Session(engine) as session:
         draft_row = Draft(
             draft_id=draft_id,
             document_id=document_id,
             draft_type=draft_type,
-            title=f"{document_title} — {query[:60]}" if document_title else query[:80],
+            title=draft_title,
             sections_json=json.dumps(final_sections),
             grounding_score=overall_grounding,
             warnings_json=json.dumps([]),
@@ -150,7 +152,7 @@ def assembler_node(state: DraftingState) -> dict:
 
     return {
         "final_draft_id":       draft_id,
-        "final_title":          draft_row.title,
+        "final_title":          draft_title,
         "final_sections":       final_sections,
         "final_grounding_score": overall_grounding,
         "final_judge_scores":   judge_scores,

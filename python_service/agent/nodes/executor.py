@@ -25,7 +25,7 @@ WHY per-section retrieval?
 import json
 import logging
 
-import google.generativeai as genai
+from groq import Groq
 
 from python_service.agent.state import DraftingState, SectionDraft
 from python_service.config import settings
@@ -102,23 +102,23 @@ def _build_evidence_block(evidence_items) -> tuple[str, dict]:
     return "\n\n".join(blocks), evidence_map
 
 
-@observe(name="gemini-executor-section")
+@observe(name="groq-executor-section")
 def _call_gemini_for_section(prompt: str) -> dict:
-    """Call Gemini 2.5 Flash in JSON mode for one section."""
-    if not settings.gemini_api_key:
-        raise RuntimeError("GEMINI_API_KEY not set in .env")
-    genai.configure(api_key=settings.gemini_api_key)
-
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json",
-            temperature=0.2,
-            max_output_tokens=2048,
-        ),
+    """Call Groq Llama 3.3 70B in JSON mode for one section."""
+    if not settings.groq_api_key:
+        raise RuntimeError("GROQ_API_KEY not set in .env")
+    client = Groq(api_key=settings.groq_api_key)
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": "You are a legal drafting assistant. Respond only with valid JSON."},
+            {"role": "user", "content": prompt},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.2,
+        max_tokens=2048,
     )
-    response = model.generate_content(prompt)
-    return json.loads(response.text)
+    return json.loads(response.choices[0].message.content)
 
 
 def executor_node(state: DraftingState) -> dict:

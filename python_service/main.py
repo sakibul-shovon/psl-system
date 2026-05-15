@@ -908,20 +908,27 @@ def _write_episodic_memory(draft_id: str, edits: list[dict]) -> None:
     from python_service.vector.qdrant_store import qdrant_store
 
     try:
+        # Read every attribute we need while the session is open.
+        # Accessing ORM attributes after `with Session()` closes causes
+        # DetachedInstanceError because SQLAlchemy expires them on commit.
         with Session(engine) as session:
             draft = session.get(Draft, draft_id)
-        if not draft:
-            logger.warning("EpisodicMemory skipped — draft %r not found", draft_id)
-            return
+            if not draft:
+                logger.warning("EpisodicMemory skipped — draft %r not found", draft_id)
+                return
+            document_id        = draft.document_id
+            draft_type         = draft.draft_type
+            grounding_score    = draft.grounding_score
+            processing_meta    = draft.processing_meta_json or "{}"
+            judge_scores_raw   = draft.judge_scores_json or "{}"
 
         # Extract query + document_type from the processing metadata the
         # assembler wrote. Falls back gracefully if either is missing.
-        meta = _json.loads(draft.processing_meta_json or "{}")
+        meta = _json.loads(processing_meta)
         query = meta.get("query", "")
         document_type = meta.get("documentType", "unknown")
-        draft_type = draft.draft_type
 
-        judge_scores = _json.loads(draft.judge_scores_json or "{}")
+        judge_scores = _json.loads(judge_scores_raw)
         try:
             judge_overall = float(judge_scores["overall"]) if judge_scores.get("overall") else None
         except (TypeError, ValueError):
@@ -939,12 +946,12 @@ def _write_episodic_memory(draft_id: str, edits: list[dict]) -> None:
         )
 
         memory = EpisodicMemory(
-            document_id=draft.document_id,
+            document_id=document_id,
             document_type=document_type,
             query=query,
             draft_id=draft_id,
             draft_type=draft_type,
-            grounding_score=draft.grounding_score,
+            grounding_score=grounding_score,
             judge_overall=judge_overall,
             edit_distance_total=edit_distance_total,
             edit_count=len(edits),
@@ -953,21 +960,24 @@ def _write_episodic_memory(draft_id: str, edits: list[dict]) -> None:
         with Session(engine) as session:
             session.add(memory)
             session.commit()
+            # Read memory_id while session is open; commit expires the object
+            # and accessing it afterwards causes DetachedInstanceError.
+            memory_id = memory.memory_id
 
         # Embed "query | document_type" so the planner can find similar sessions
         # using cosine similarity (same approach as pattern retrieval).
         embed_text = f"{query} | {document_type}"
         vector = embed_one(embed_text)
         point_id = qdrant_store.upsert_episodic_memory(
-            memory_id=memory.memory_id,
+            memory_id=memory_id,
             query_vector=vector,
             payload={
-                "memory_id":           memory.memory_id,
-                "document_id":         draft.document_id,
+                "memory_id":           memory_id,
+                "document_id":         document_id,
                 "document_type":       document_type,
                 "draft_type":          draft_type,
                 "query":               query[:200],
-                "grounding_score":     draft.grounding_score,
+                "grounding_score":     grounding_score,
                 "judge_overall":       judge_overall,
                 "edit_count":          len(edits),
                 "edit_distance_total": edit_distance_total,
@@ -975,7 +985,7 @@ def _write_episodic_memory(draft_id: str, edits: list[dict]) -> None:
         )
 
         with Session(engine) as session:
-            mem = session.get(EpisodicMemory, memory.memory_id)
+            mem = session.get(EpisodicMemory, memory_id)
             if mem:
                 mem.qdrant_point_id = point_id
                 session.add(mem)
@@ -983,7 +993,7 @@ def _write_episodic_memory(draft_id: str, edits: list[dict]) -> None:
 
         logger.info(
             "EpisodicMemory %r written for draft %r (edits=%d, total_dist=%d)",
-            memory.memory_id, draft_id, len(edits), edit_distance_total,
+            memory_id, draft_id, len(edits), edit_distance_total,
         )
 
     except Exception as exc:

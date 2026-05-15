@@ -34,6 +34,9 @@ python-Levenshtein==0.26.0      # fast edit distance for metrics later
 # ─── UI ───────────────────────────────────────────────────────────────────
 streamlit==1.39.0
 
+# ─── Agent orchestration ──────────────────────────────────────────────────
+langgraph==1.2.0                # LangGraph stateful multi-actor agent framework
+
 # ─── Observability ────────────────────────────────────────────────────────
 langfuse==2.58.2                # LLM tracing dashboard (optional — app works without keys)
 

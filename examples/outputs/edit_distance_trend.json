@@ -10,73 +10,48 @@
   "rounds": [
     {
       "round": 0,
+      "draft_id": "3ab34320-49b2-4b91-bad7-aaf4e9f892c4",
       "distances": [
-        0.5202,
-        0.6615,
-        0.7204,
-        0.8112,
-        0.7432
+        0.8019,
+        0.8462,
+        0.8228,
+        0.8019,
+        0.7902
       ],
-      "avg_distance": 0.6913,
+      "avg_distance": 0.8126,
+      "grounding_score": 1.0,
       "patterns_active": 0,
-      "grounding_score": null,
-      "simulated": true
+      "simulated": false
     },
     {
       "round": 1,
+      "draft_id": "c3f6d3b5-5f97-4822-8399-b89b107b46f5",
       "distances": [
-        0.4162,
-        0.5292,
-        0.5763,
-        0.649,
-        0.5946
+        0.8046,
+        0.8483,
+        0.8253,
+        0.8046,
+        0.7931
       ],
-      "avg_distance": 0.5531,
-      "patterns_active": 2,
-      "grounding_score": null,
-      "simulated": true
+      "avg_distance": 0.8152,
+      "grounding_score": 1.0,
+      "patterns_active": 0,
+      "simulated": false
     },
     {
       "round": 2,
+      "draft_id": "9bc2d35c-1d6e-49e9-bbdf-7401e486731b",
       "distances": [
-        0.3329,
-        0.4234,
-        0.4611,
-        0.5192,
-        0.4756
+        0.8019,
+        0.8462,
+        0.8228,
+        0.8019,
+        0.7902
       ],
-      "avg_distance": 0.4424,
-      "patterns_active": 4,
-      "grounding_score": null,
-      "simulated": true
-    },
-    {
-      "round": 3,
-      "distances": [
-        0.2663,
-        0.3387,
-        0.3688,
-        0.4153,
-        0.3805
-      ],
-      "avg_distance": 0.3539,
-      "patterns_active": 6,
-      "grounding_score": null,
-      "simulated": true
-    },
-    {
-      "round": 4,
-      "distances": [
-        0.2131,
-        0.271,
-        0.2951,
-        0.3323,
-        0.3044
-      ],
-      "avg_distance": 0.2832,
-      "patterns_active": 8,
-      "grounding_score": null,
-      "simulated": true
+      "avg_distance": 0.8126,
+      "grounding_score": 1.0,
+      "patterns_active": 0,
+      "simulated": false
     }
   ]
 }

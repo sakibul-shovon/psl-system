@@ -22,7 +22,7 @@ This node also:
 import json
 import logging
 
-import google.generativeai as genai
+from groq import Groq
 from sqlmodel import Session
 
 from python_service.agent.state import DraftingState, SectionPlan
@@ -121,26 +121,23 @@ def _retrieve_episodic_context(query: str, document_type: str) -> str:
     return "\n".join(lines)
 
 
-@observe(name="gemini-planner")
+@observe(name="groq-planner")
 def _call_gemini(prompt: str) -> dict:
-    """
-    Call Gemini 2.5 Flash in JSON mode and return the parsed dict.
-    We reuse the same Gemini setup as generation/gemini.py.
-    """
-    if not settings.gemini_api_key:
-        raise RuntimeError("GEMINI_API_KEY not set in .env")
-    genai.configure(api_key=settings.gemini_api_key)
-
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json",
-            temperature=0.1,       # planner needs to be deterministic, low temp
-            max_output_tokens=2048,  # plans are short — sections list only
-        ),
+    """Call Groq Llama 3.3 70B in JSON mode and return the parsed dict."""
+    if not settings.groq_api_key:
+        raise RuntimeError("GROQ_API_KEY not set in .env")
+    client = Groq(api_key=settings.groq_api_key)
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {"role": "system", "content": "You are a legal document analyst. Respond only with valid JSON."},
+            {"role": "user", "content": prompt},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.1,
+        max_tokens=2048,
     )
-    response = model.generate_content(prompt)
-    return json.loads(response.text)
+    return json.loads(response.choices[0].message.content)
 
 
 def planner_node(state: DraftingState) -> dict:

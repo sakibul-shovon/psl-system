@@ -150,7 +150,7 @@ def _poll_job(client: httpx.Client, job_id: str, timeout: int = 300) -> dict:
         stage  = job.get("stage", "")
         progress = job.get("progress", 0)
 
-        if status == "completed":
+        if status == "done":
             print(f"\r  Job {job_id[:8]}… completed ({stage})          ")
             return job
         if status == "failed":

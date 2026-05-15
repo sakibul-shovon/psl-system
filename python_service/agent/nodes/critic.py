@@ -126,9 +126,8 @@ def _check_style(
 
     violations = result.get("violations", [])
     if violations:
-        descriptions = "; ".join(
-            v.get("description", "unknown violation") for v in violations[:3]
-        )
+        # adherence_checker returns violations as a list[str] (description strings)
+        descriptions = "; ".join(str(v) for v in violations[:3])
         return CritiqueItem(
             section_id=draft["section_id"],
             weakness_type="STYLE_VIOLATION",

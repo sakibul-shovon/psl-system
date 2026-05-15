@@ -145,7 +145,7 @@ def get_document_id(client: httpx.Client) -> str:
 
 def generate_draft(client: httpx.Client, document_id: str) -> dict:
     """POST /draft and return the full response dict."""
-    resp = client.post("/draft", json={"document_id": document_id, "draft_type": "employment_agreement"})
+    resp = client.post("/draft", json={"document_id": document_id, "draft_type": "employment_agreement", "query": "Summarize compensation, termination, and severance terms"})
     resp.raise_for_status()
     return resp.json()
 

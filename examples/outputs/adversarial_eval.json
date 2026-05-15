@@ -1,9 +1,9 @@
 {
   "total_queries": 8,
-  "correctly_refused": 7,
-  "incorrectly_answered": 1,
-  "refusal_precision": 0.875,
-  "grade": "GOOD",
+  "correctly_refused": 8,
+  "incorrectly_answered": 0,
+  "refusal_precision": 1.0,
+  "grade": "EXCELLENT",
   "target_precision": 0.8,
   "met_target": true,
   "refusal_signals": {
@@ -11,9 +11,7 @@
     "B_low_grounding_score": "grounding_score < 0.30"
   },
   "reason_breakdown": {
-    "explicit_refusal_marker": 6,
-    "answered": 1,
-    "low_grounding_score": 1
+    "explicit_refusal_marker": 8
   },
   "results": [
     {
@@ -22,8 +20,8 @@
       "refused": true,
       "reason": "explicit_refusal_marker",
       "grounding_score": 0.0,
-      "sections_count": 0,
-      "synthetic": true
+      "sections_count": 4,
+      "draft_id": "78976be1-3fb3-4cb1-927f-c05506706f36"
     },
     {
       "query_num": 2,
@@ -31,17 +29,17 @@
       "refused": true,
       "reason": "explicit_refusal_marker",
       "grounding_score": 0.0,
-      "sections_count": 0,
-      "synthetic": true
+      "sections_count": 4,
+      "draft_id": "75f3a490-001d-4ef4-8fac-72f37e74f53a"
     },
     {
       "query_num": 3,
       "query": "What irrigation requirements for rice cultivation are defined in this agreement?",
       "refused": true,
       "reason": "explicit_refusal_marker",
-      "grounding_score": 0.0,
-      "sections_count": 0,
-      "synthetic": true
+      "grounding_score": 0.062,
+      "sections_count": 4,
+      "draft_id": "22aee515-1159-4c2a-ba57-a2d079281aec"
     },
     {
       "query_num": 4,
@@ -49,26 +47,26 @@
       "refused": true,
       "reason": "explicit_refusal_marker",
       "grounding_score": 0.0,
-      "sections_count": 0,
-      "synthetic": true
+      "sections_count": 4,
+      "draft_id": "351cba0b-e0cc-446e-a43e-20c424725f1b"
     },
     {
       "query_num": 5,
       "query": "Describe the nuclear waste disposal obligations mandated by this contract.",
-      "refused": false,
-      "reason": "answered",
-      "grounding_score": 0.34,
-      "sections_count": 3,
-      "synthetic": true
+      "refused": true,
+      "reason": "explicit_refusal_marker",
+      "grounding_score": 0.0,
+      "sections_count": 4,
+      "draft_id": "f736e86e-5410-4ea7-806f-439ac0d79346"
     },
     {
       "query_num": 6,
       "query": "What derivative instrument pricing formulas are embedded in this agreement?",
       "refused": true,
-      "reason": "low_grounding_score (0.12)",
-      "grounding_score": 0.12,
-      "sections_count": 0,
-      "synthetic": true
+      "reason": "explicit_refusal_marker",
+      "grounding_score": 0.0,
+      "sections_count": 4,
+      "draft_id": "aaa105cc-36c5-491d-a47f-2ec9766c41bd"
     },
     {
       "query_num": 7,
@@ -76,8 +74,8 @@
       "refused": true,
       "reason": "explicit_refusal_marker",
       "grounding_score": 0.0,
-      "sections_count": 0,
-      "synthetic": true
+      "sections_count": 4,
+      "draft_id": "27c8ba43-cbf3-4fdc-b693-1c62796b3f35"
     },
     {
       "query_num": 8,
@@ -85,9 +83,9 @@
       "refused": true,
       "reason": "explicit_refusal_marker",
       "grounding_score": 0.0,
-      "sections_count": 0,
-      "synthetic": true
+      "sections_count": 4,
+      "draft_id": "94a10d11-c0d5-423d-9bba-bdcd4ac502ef"
     }
   ],
-  "dry_run": true
+  "dry_run": false
 }

@@ -13,6 +13,7 @@ Loaded as a singleton (same lazy-load pattern as the embedder).
 """
 
 import logging
+import threading
 from typing import Optional
 
 from sentence_transformers import CrossEncoder
@@ -23,14 +24,21 @@ MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 INSUFFICIENT_EVIDENCE_THRESHOLD = -3.0   # ms-marco raw logits: -10 to +10. -3 = clearly not relevant.
 
 _model: Optional[CrossEncoder] = None
+_lock = threading.Lock()
 
 
 def _get_model() -> CrossEncoder:
     global _model
     if _model is None:
-        logger.info("Loading reranker model '%s'...", MODEL_NAME)
-        _model = CrossEncoder(MODEL_NAME)
-        logger.info("Reranker model loaded.")
+        with _lock:
+            if _model is None:
+                logger.info("Loading reranker model '%s'...", MODEL_NAME)
+                _model = CrossEncoder(
+                    MODEL_NAME,
+                    device="cpu",
+                    automodel_args={"low_cpu_mem_usage": False},
+                )
+                logger.info("Reranker model loaded.")
     return _model
 
 

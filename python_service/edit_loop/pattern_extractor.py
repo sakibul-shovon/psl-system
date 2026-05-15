@@ -19,6 +19,7 @@ NOISE edits return None — nothing is learned from them.
 
 import json
 import logging
+import time
 from typing import Optional
 
 from groq import Groq
@@ -27,6 +28,9 @@ from python_service.config import settings
 from python_service.observability.langfuse_client import observe
 
 logger = logging.getLogger(__name__)
+
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 8
 
 _EXTRACT_PROMPT = """\
 You are a legal writing expert extracting a reusable style rule from an editor's correction.
@@ -108,25 +112,39 @@ def extract_pattern(
         draft_type=draft_type,
     )
 
-    try:
-        client = _get_client()
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=512,
-            response_format={"type": "json_object"},
-        )
-        result = json.loads(response.choices[0].message.content)
+    # Use llama-3.1-8b-instant (500K TPD) instead of 70b (100K TPD).
+    # Rule extraction follows a strict JSON template so the smaller model
+    # is accurate enough here; 70b is saved for classification where label
+    # accuracy matters more.
+    for attempt in range(_MAX_RETRIES):
+        try:
+            client = _get_client()
+            response = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=512,
+                response_format={"type": "json_object"},
+            )
+            result = json.loads(response.choices[0].message.content)
 
-        logger.info(
-            "Extracted pattern [%s]: %s (conf=%.2f)",
-            result.get("rule_type", "?"),
-            result.get("description", "")[:80],
-            result.get("confidence", 0),
-        )
-        return result
+            logger.info(
+                "Extracted pattern [%s]: %s (conf=%.2f)",
+                result.get("rule_type", "?"),
+                result.get("description", "")[:80],
+                result.get("confidence", 0),
+            )
+            return result
 
-    except Exception as exc:
-        logger.error("Pattern extraction failed: %s", exc)
-        return None
+        except Exception as exc:
+            err = str(exc)
+            if ("429" in err or "rate" in err.lower()) and attempt < _MAX_RETRIES - 1:
+                delay = _RETRY_BASE_DELAY * (2 ** attempt)
+                logger.warning(
+                    "Pattern extractor rate-limited (attempt %d/%d) — retrying in %ds",
+                    attempt + 1, _MAX_RETRIES, delay,
+                )
+                time.sleep(delay)
+                continue
+            logger.error("Pattern extraction failed: %s", exc)
+            return None

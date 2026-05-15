@@ -24,7 +24,7 @@ the executor's next prompt via a hint stored in the plan's brief field.
 import json
 import logging
 
-import google.generativeai as genai
+from groq import Groq
 
 from python_service.agent.state import CritiqueItem, DraftingState, SectionPlan
 from python_service.config import settings
@@ -60,19 +60,8 @@ def _improve_query(
     Falls back to a simple broadening heuristic if the API call fails,
     so the pipeline never stalls on a refiner error.
     """
-    if not settings.gemini_api_key:
-        # Heuristic fallback: just append "clause terms provisions"
+    if not settings.groq_api_key:
         return plan_section["retrieval_query"] + " clause terms provisions details"
-
-    genai.configure(api_key=settings.gemini_api_key)
-    model = genai.GenerativeModel(
-        model_name="gemini-2.5-flash",
-        generation_config=genai.GenerationConfig(
-            response_mime_type="application/json",
-            temperature=0.3,
-            max_output_tokens=256,
-        ),
-    )
 
     prompt = _REFINE_PROMPT.format(
         title=plan_section["title"],
@@ -83,8 +72,18 @@ def _improve_query(
     )
 
     try:
-        response = model.generate_content(prompt)
-        result = json.loads(response.text)
+        client = Groq(api_key=settings.groq_api_key)
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": "You are a legal research assistant. Respond only with valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3,
+            max_tokens=256,
+        )
+        result = json.loads(response.choices[0].message.content)
         improved = result.get("improved_query", "").strip()
         if improved and improved != plan_section["retrieval_query"]:
             return improved
