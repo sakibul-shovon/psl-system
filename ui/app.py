@@ -23,10 +23,18 @@ def api(method: str, path: str, **kwargs):
     try:
         r = httpx.request(method, f"{API}{path}", timeout=120, **kwargs)
         if r.status_code >= 400:
-            return None, r.json().get("detail", r.text)
-        return r.json(), None
+            try:
+                return None, r.json().get("detail", r.text)
+            except Exception:
+                return None, f"HTTP {r.status_code} — {r.text[:500] or '(empty body)'}"
+        if not r.content:
+            return None, None
+        try:
+            return r.json(), None
+        except Exception as exc:
+            return None, f"JSON parse error — status {r.status_code}, body: {r.text[:500]}"
     except Exception as exc:
-        return None, str(exc)
+        return None, f"Request failed: {exc}"
 
 
 # ── Page config ────────────────────────────────────────────────────────────────
@@ -196,6 +204,61 @@ if page == "Projects":
                                     bar.progress(0, text=f"{fname}: failed ❌")
                                     break
                         st.rerun()
+
+            st.divider()
+
+            # ── Cross-document query ──────────────────────────────────────────
+            st.markdown("### Query Across All Documents")
+            st.caption("Search for evidence in every file in this project. Returns raw matching chunks — no draft generated.")
+
+            proj_search_query = st.text_input(
+                "Search query",
+                placeholder="What are the termination clauses?",
+                key="proj_search_query",
+            )
+
+            if st.button("Search Project", type="secondary") and proj_search_query.strip():
+                with st.spinner("Searching all documents…"):
+                    search_result, serr = api(
+                        "POST", f"/projects/{project_id}/query",
+                        json={"query": proj_search_query.strip()},
+                    )
+
+                if serr:
+                    st.error(f"Search failed: {serr}")
+                elif search_result:
+                    total = search_result.get("total_evidence_found", 0)
+                    searched = search_result.get("documents_searched", 0)
+                    st.success(f"Found **{total}** evidence chunk(s) across **{searched}** document(s).")
+
+                    for doc_result in search_result.get("results", []):
+                        doc_title = doc_result.get("document_title", "Unknown")
+                        evidence = doc_result.get("evidence", [])
+                        sufficient = doc_result.get("sufficient", True)
+
+                        label = f"📄 **{doc_title}** — {len(evidence)} chunk(s) found"
+                        if evidence and not sufficient:
+                            label += " ⚠️ low confidence"
+
+                        with st.expander(label, expanded=len(evidence) > 0):
+                            if not evidence:
+                                st.caption(f"No evidence found. {doc_result.get('diagnostic', '')}")
+                            else:
+                                if not sufficient:
+                                    st.warning(
+                                        "These chunks are below the high-confidence threshold "
+                                        "but are the closest matches found in this document.",
+                                        icon="⚠️",
+                                    )
+                                for ev in evidence:
+                                    score = ev.get("rerank_score", 0)
+                                    score_color = "🟢" if score >= 0 else "🟡" if score >= -3 else "🔴"
+                                    st.markdown(
+                                        f"**[{ev['evidence_id']}]** `{ev.get('breadcrumb', '')}`  "
+                                        f"— {score_color} score: `{score:.2f}`"
+                                    )
+                                    st.write(ev.get("content", ""))
+                                    st.markdown("---")
 
             st.divider()
 

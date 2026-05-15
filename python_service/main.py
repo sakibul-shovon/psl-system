@@ -83,6 +83,19 @@ app.add_middleware(
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
 
+@app.get("/db-test")
+def db_test():
+    """Sync route — tests raw SQLite access via Session."""
+    import traceback
+    try:
+        from sqlmodel import select, text
+        with Session(engine) as s:
+            result = s.exec(select(Document).limit(1)).all()
+        return {"ok": True, "doc_count": len(result)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "trace": traceback.format_exc()}
+
+
 @app.get("/health")
 async def health():
     """Liveness + config sanity check. Hit this first when debugging."""
@@ -246,23 +259,30 @@ async def create_project(body: dict):
 @app.get("/projects")
 async def list_projects():
     """List all projects, newest first."""
-    from sqlmodel import select
-    with Session(engine) as session:
-        projects = session.exec(
-            select(Project).order_by(Project.created_at.desc())
-        ).all()
+    import traceback
+    try:
+        from sqlmodel import select
+        with Session(engine) as session:
+            projects = session.exec(select(Project)).all()
+
         result = []
         for p in projects:
-            doc_count = len(session.exec(
-                select(Document).where(Document.project_id == p.project_id)
-            ).all())
+            with Session(engine) as session2:
+                doc_count = len(session2.exec(
+                    select(Document).where(Document.project_id == p.project_id)
+                ).all())
             result.append({
                 "project_id": p.project_id,
                 "name": p.name,
                 "document_count": doc_count,
                 "created_at": p.created_at.isoformat(),
             })
-    return {"projects": result}
+
+        result.sort(key=lambda x: x["created_at"], reverse=True)
+        return {"projects": result}
+    except Exception as exc:
+        logger.error("list_projects failed: %s\n%s", exc, traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/projects/{project_id}")
@@ -360,6 +380,68 @@ async def upload_files_to_project(
         "project_id": project_id,
         "uploaded": results,
         "message": f"{len(results)} file(s) queued. Poll GET /job/{{job_id}} per file.",
+    }
+
+
+@app.post("/projects/{project_id}/query")
+async def query_project(project_id: str, body: dict):
+    """
+    Run hybrid retrieval across ALL documents in a project.
+
+    Body: { "query": "What are the termination clauses?" }
+
+    Returns evidence items grouped by source document, each labelled [E1]–[E5].
+    """
+    from sqlmodel import select
+
+    query = (body.get("query") or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="'query' is required")
+
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail=f"Project {project_id!r} not found")
+        docs = session.exec(
+            select(Document).where(Document.project_id == project_id)
+        ).all()
+
+    if not docs:
+        raise HTTPException(status_code=400, detail="Project has no documents. Upload files first.")
+
+    results = []
+    for doc in docs:
+        result = retrieve(query, doc.document_id)
+        # For project search we always return whatever evidence exists, even if
+        # below the draft-generation threshold. The user is exploring, not drafting.
+        if result.evidence:
+            evidence_items = package_evidence(result.evidence, document_title=doc.title)
+            results.append({
+                "document_id": doc.document_id,
+                "document_title": doc.title,
+                "retrieval_method": result.retrieval_method,
+                "sufficient": result.sufficient,
+                "evidence": [e.to_dict() for e in evidence_items],
+            })
+        else:
+            results.append({
+                "document_id": doc.document_id,
+                "document_title": doc.title,
+                "retrieval_method": "none",
+                "sufficient": False,
+                "evidence": [],
+                "diagnostic": result.diagnostic,
+            })
+
+    # Sort: documents with evidence first, then by number of evidence items
+    results.sort(key=lambda r: len(r["evidence"]), reverse=True)
+    total_evidence = sum(len(r["evidence"]) for r in results)
+    return {
+        "project_id": project_id,
+        "query": query,
+        "documents_searched": len(docs),
+        "total_evidence_found": total_evidence,
+        "results": results,
     }
 
 
