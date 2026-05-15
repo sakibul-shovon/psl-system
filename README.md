@@ -379,7 +379,30 @@ Open **http://localhost:8501** after starting the stack. The sidebar has five pa
 
 ---
 
-### 1. Upload Documents
+### 1. Projects — Group Multiple Documents into a Case
+
+**Sidebar → Projects**
+
+A **Project** is a named case or matter that groups multiple documents together. Once documents are grouped into a project, you can query and draft across **all files at once** — the system searches every document in the project and combines the evidence.
+
+**Create a project:**
+1. Click **"Create a new project"** and give it a name (e.g. *"Jules v. Balazs"*).
+2. Upload files directly to the project using the **"Upload files to this project"** panel on the right — drag and drop or click **Browse files**.
+3. Add as many files as needed (petition, briefs, circuit opinion, Supreme Court opinion, etc.).
+
+**Open an existing project:**
+1. Use the **"Select a project to open"** dropdown — it shows all projects with their file count (e.g. *"check (6 file(s))"*).
+2. The project panel shows all documents in it with type, page count, and document ID.
+
+**Query across all project files:**
+- When you go to **Query** or **Draft** and select a project, evidence is retrieved from all documents in the project simultaneously.
+- This is the key difference from single-document mode: a question like *"What did the Second Circuit rule?"* will find the answer whether it's in the brief, the petition, or the circuit opinion.
+
+**Example use case:** Upload all Jules v. Balazs documents into one project — petition, opposition brief, Second Circuit opinion, Supreme Court briefs. Then ask *"What sanctions were imposed and why?"* and get evidence pulled from whichever document contains the answer.
+
+---
+
+### 2. Upload Documents
 
 **Sidebar → Upload**
 
