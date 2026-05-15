@@ -4,6 +4,42 @@
 
 ---
 
+## Table of Contents
+
+1. [What This System Does](#what-this-system-does)
+2. [Four Pillars](#four-pillars)
+3. [Architecture Diagram](#architecture-diagram)
+4. [Ingestion Pipeline](#ingestion-pipeline)
+5. [Retrieval Pipeline](#retrieval-pipeline)
+6. [Agentic Draft — LangGraph Graph](#agentic-draft--langgraph-graph)
+7. [Hallucination Guard — Two Layers](#hallucination-guard--two-layers)
+8. [Learning Loop — How Operator Edits Improve Future Drafts](#learning-loop--how-operator-edits-improve-future-drafts)
+9. [Data Model](#data-model)
+10. [API Reference](#api-reference)
+11. [Using the UI — Step-by-Step Guide](#using-the-ui--step-by-step-guide)
+    - [1. Projects](#1-projects--group-multiple-documents-into-a-case)
+    - [3. Upload Documents](#3-upload-documents)
+    - [4. Query Evidence](#4-query-evidence-search-within-a-document)
+    - [5. Generate a Draft](#5-generate-a-draft)
+    - [6. Submit Feedback](#6-submit-feedback-teach-the-system)
+    - [7. Metrics](#7-view-metrics-and-learned-patterns)
+    - [8. Comparison](#8-compare-baseline-vs-improved)
+    - [9. Agent Trace](#9-inspect-agent-traces)
+12. [Quick Start — Docker](#quick-start--docker-recommended)
+13. [Quick Start — Local](#quick-start--local-no-docker-for-the-app)
+14. [Environment Variables](#environment-variables)
+15. [Example Files](#example-files)
+16. [Evaluation Scripts](#evaluation-scripts)
+17. [Tests](#tests)
+18. [Verifying the Learning Loop](#verifying-the-learning-loop)
+19. [Deploy to Render](#deploy-to-render)
+20. [Latency Profile](#latency-profile)
+21. [Project Structure](#project-structure)
+22. [Assumptions and Tradeoffs](#assumptions-and-tradeoffs)
+23. [Known Limitations](#known-limitations)
+
+---
+
 ## What This System Does
 
 Legal AI systems commonly generate plausible-sounding text that has no basis in the actual document. A clause gets cited that does not exist. A figure gets invented that was never in the contract. The text looks authoritative. It is fabricated.
