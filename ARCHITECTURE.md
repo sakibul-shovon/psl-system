@@ -1,6 +1,6 @@
 # PSL Document Intelligence — Architecture
 
-This document is a technical deep-dive into how the PSL system works. It covers data flow, component design, latency profile, and the rationale behind key structural choices. For quick-start instructions see [README.md](README.md). For the rationale behind individual design decisions see [DESIGN_DECISIONS.md](DESIGN_DECISIONS.md).
+This document is a technical deep-dive into how the PSL system works. It covers data flow, component design, latency profile, and the rationale behind key structural choices. For quick-start instructions see [README.md](README.md).
 
 ---
 

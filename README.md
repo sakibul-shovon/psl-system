@@ -834,6 +834,31 @@ psl-system/
 
 ---
 
+## Assumptions and Tradeoffs
+
+### Assumptions
+
+- **Document language is English.** OCR, embeddings (BAAI/bge-base-en-v1.5), and the NLI model (nli-deberta-v3-small) are all English-optimised. Multi-language support would require swapping all three.
+- **Queries are factual questions about document content.** The system is designed to answer "what does this document say about X?" — not to perform legal reasoning or give legal advice.
+- **Free-tier LLM APIs (Gemini, Groq) are sufficient for development.** Groq's free tier is 100k tokens/day. Heavy parallel draft generation will hit this limit; a paid tier or rate-limiting strategy is needed for production.
+- **Single-user or low-concurrency use.** SQLite is single-writer. Multiple simultaneous `/draft` calls queue behind each other. PostgreSQL (drop-in via `DATABASE_URL`) is the production path.
+- **Operator edits are honest signal.** The learning loop assumes edits represent genuine style corrections, not adversarial inputs. No adversarial-edit filtering is implemented.
+
+### Key Tradeoffs
+
+| Decision | What was chosen | What was given up |
+|----------|----------------|-------------------|
+| **SQLite over PostgreSQL** | Zero-ops setup, easy Docker volume | Single-writer, no horizontal scale |
+| **Groq Llama 3.3 70B for generation** | Fast, free tier, JSON mode | 12k TPM / 100k TPD rate limits on free tier |
+| **Gemini 2.5 Flash for planning** | High quality multi-step reasoning | Paid API, latency ~2–5 s/call |
+| **CPU-only inference** | No GPU required, runs anywhere | Ingestion ~10–15 s/page for scanned docs |
+| **NLI sentence-level grounding** | Local, no API cost, fast | Cannot handle cross-sentence legal inferences |
+| **Cross-encoder rerank (ms-marco-MiniLM)** | Strong relevance scoring, 22 MB | 512-token BERT limit (mitigated with sliding window) |
+| **LangGraph fan-out per section** | Parallel section generation | Multiplied API token consumption, hits rate limits faster |
+| **Monolith over microservices** | Simple deployment, easy to reason about | Not independently scalable per component |
+
+---
+
 ## Known Limitations
 
 1. **NLI is sentence-level, not cross-sentence.** `nli-deberta-v3-small` checks each sentence against the evidence pool independently. Legal conclusions that require chaining across two evidence chunks may be labelled NEUTRAL even when the combined inference is correct. A larger model or chain-of-thought verifier would close this gap.
