@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from sqlmodel import Session
 
 from python_service.config import settings
-from python_service.db.models import Chunk, Document
+from python_service.db.models import Chunk, Document, Project
 from python_service.db.session import create_db_and_tables, engine
 from python_service.vector.qdrant_store import qdrant_store
 from python_service import jobs as job_store
@@ -212,6 +212,245 @@ async def list_documents(limit: int = 100):
             }
             for d in docs
         ],
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PROJECTS — group documents into named cases / matters
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.post("/projects")
+async def create_project(body: dict):
+    """
+    Create a named project (case / matter) that groups multiple documents.
+
+    Body: { "name": "Case 20 — Specter v. Litt" }
+    """
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="'name' is required")
+
+    project = Project(name=name, operator_id=settings.default_operator_id)
+    with Session(engine) as session:
+        session.add(project)
+        session.commit()
+        session.refresh(project)
+
+    return {
+        "project_id": project.project_id,
+        "name": project.name,
+        "created_at": project.created_at.isoformat(),
+    }
+
+
+@app.get("/projects")
+async def list_projects():
+    """List all projects, newest first."""
+    from sqlmodel import select
+    with Session(engine) as session:
+        projects = session.exec(
+            select(Project).order_by(Project.created_at.desc())
+        ).all()
+        result = []
+        for p in projects:
+            doc_count = len(session.exec(
+                select(Document).where(Document.project_id == p.project_id)
+            ).all())
+            result.append({
+                "project_id": p.project_id,
+                "name": p.name,
+                "document_count": doc_count,
+                "created_at": p.created_at.isoformat(),
+            })
+    return {"projects": result}
+
+
+@app.get("/projects/{project_id}")
+async def get_project(project_id: str):
+    """Get a project and all its documents."""
+    from sqlmodel import select
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail=f"Project {project_id!r} not found")
+        docs = session.exec(
+            select(Document)
+            .where(Document.project_id == project_id)
+            .order_by(Document.uploaded_at.desc())
+        ).all()
+
+    return {
+        "project_id": project.project_id,
+        "name": project.name,
+        "created_at": project.created_at.isoformat(),
+        "documents": [
+            {
+                "document_id": d.document_id,
+                "title": d.title,
+                "document_type": d.document_type,
+                "file_type": d.file_type,
+                "page_count": d.page_count,
+                "uploaded_at": d.uploaded_at.isoformat(),
+                "processed": d.processed_at is not None,
+            }
+            for d in docs
+        ],
+    }
+
+
+@app.post("/projects/{project_id}/upload")
+async def upload_files_to_project(
+    project_id: str,
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(...),
+):
+    """
+    Upload one or more files into a project. Each file is processed independently
+    through the full ingestion pipeline (OCR → chunk → embed → store).
+
+    Returns a list of { document_id, job_id, filename } for each file so the
+    UI can poll GET /job/{job_id} per file.
+    """
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project {project_id!r} not found")
+
+    allowed = {".pdf", ".jpg", ".jpeg", ".png", ".tiff", ".tif"}
+    results = []
+
+    for file in files:
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File {file.filename!r}: unsupported type {suffix!r}. Allowed: {', '.join(allowed)}",
+            )
+
+        document_id = str(uuid.uuid4())
+        job_id = str(uuid.uuid4())
+
+        safe_name = f"{document_id}{suffix}"
+        save_path = settings.uploads_dir / safe_name
+        contents = await file.read()
+        save_path.write_bytes(contents)
+
+        with Session(engine) as session:
+            doc = Document(
+                document_id=document_id,
+                title=file.filename,
+                file_path=str(save_path),
+                file_type=suffix.lstrip("."),
+                operator_id=settings.default_operator_id,
+                project_id=project_id,
+            )
+            session.add(doc)
+            session.commit()
+
+        job_store.create_job(job_id, document_id=document_id)
+        background_tasks.add_task(run_ingestion_pipeline, save_path, document_id, job_id)
+
+        results.append({
+            "document_id": document_id,
+            "job_id": job_id,
+            "filename": file.filename,
+        })
+
+    return {
+        "project_id": project_id,
+        "uploaded": results,
+        "message": f"{len(results)} file(s) queued. Poll GET /job/{{job_id}} per file.",
+    }
+
+
+@app.post("/projects/{project_id}/draft")
+async def generate_project_draft(project_id: str, body: dict):
+    """
+    Generate a draft grounded in ALL documents in the project.
+
+    Runs the existing single-document agent once per document, then merges
+    all sections into one unified draft. The learning loop (patterns, episodic
+    memory) is unchanged — each per-document run benefits from global patterns.
+
+    Body: { "query": "...", "draft_type": "case_fact_summary" }
+    """
+    from sqlmodel import select
+    from python_service.agent.graph import run_agent
+
+    query      = (body.get("query") or "").strip()
+    draft_type = body.get("draft_type", "case_fact_summary")
+
+    if not query:
+        raise HTTPException(status_code=400, detail="'query' is required")
+
+    with Session(engine) as session:
+        project = session.get(Project, project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail=f"Project {project_id!r} not found")
+        docs = session.exec(
+            select(Document).where(Document.project_id == project_id)
+        ).all()
+
+    if not docs:
+        raise HTTPException(
+            status_code=400,
+            detail="Project has no documents. Upload files first.",
+        )
+
+    # Run the agent once per document and collect all sections
+    all_sections: list[dict] = []
+    grounding_scores: list[float] = []
+    draft_ids: list[str] = []
+    total_patterns = 0
+
+    for doc in docs:
+        try:
+            trace = TraceBuilder("generate_draft", document_id=doc.document_id)
+            with trace.stage("agent_graph", model="gemini-2.5-flash+nli-deberta+llama-3.3-70b") as _stage:
+                state = run_agent(doc.document_id, query, draft_type)
+                _stage["meta"]["agent_nodes"] = _agent_node_detail(state)
+
+            if state.get("final_draft_id"):
+                trace.save(draft_id=state["final_draft_id"])
+                draft_ids.append(state["final_draft_id"])
+
+            sections = state.get("final_sections", [])
+            gs       = state.get("final_grounding_score", 0.0)
+
+            # Tag each section with its source document for traceability
+            for sec in sections:
+                sec["source_document_id"]    = doc.document_id
+                sec["source_document_title"] = doc.title
+            all_sections.extend(sections)
+            grounding_scores.append(gs)
+            total_patterns += len(state.get("patterns", []))
+
+        except Exception as exc:
+            logger.warning("Agent failed for document %r in project %r: %s", doc.document_id, project_id, exc)
+            # Partial failure — skip this doc, continue with others
+            continue
+
+    if not all_sections:
+        raise HTTPException(
+            status_code=500,
+            detail="All documents failed to produce a draft. Check server logs.",
+        )
+
+    avg_grounding = sum(grounding_scores) / len(grounding_scores) if grounding_scores else 0.0
+    grounding_status = "HIGH" if avg_grounding >= 0.75 else "MEDIUM" if avg_grounding >= 0.50 else "LOW"
+
+    return {
+        "status":           "ok",
+        "project_id":       project_id,
+        "project_name":     project.name,
+        "draft_type":       draft_type,
+        "query":            query,
+        "documents_used":   len(grounding_scores),
+        "draft_ids":        draft_ids,
+        "sections":         all_sections,
+        "grounding_score":  avg_grounding,
+        "grounding_status": grounding_status,
+        "patterns_applied": total_patterns,
     }
 
 

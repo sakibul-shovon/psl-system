@@ -41,7 +41,7 @@ st.sidebar.title("⚖️ PSL Intelligence")
 st.sidebar.caption("Pearson Specter Litt")
 page = st.sidebar.radio(
     "Navigate",
-    ["Upload", "Query", "Draft", "Feedback", "Metrics", "Comparison", "Agent Trace"],
+    ["Projects", "Upload", "Query", "Draft", "Feedback", "Metrics", "Comparison", "Agent Trace"],
     index=0,
 )
 
@@ -86,10 +86,175 @@ def document_picker(label: str = "Document") -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# PAGE 0 — PROJECTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+if page == "Projects":
+    st.title("Projects")
+    st.caption("Group multiple documents into a named case or matter. Query and draft across all files at once.")
+
+    # ── Create new project ────────────────────────────────────────────────────
+    with st.expander("Create a new project", expanded=False):
+        new_name = st.text_input("Project name", placeholder="Case 20 — Specter v. Litt")
+        if st.button("Create Project", type="primary") and new_name.strip():
+            data, err = api("POST", "/projects", json={"name": new_name.strip()})
+            if err:
+                st.error(f"Failed: {err}")
+            else:
+                st.success(f"Project created: **{data['name']}** (`{data['project_id'][:8]}…`)")
+                st.rerun()
+
+    st.divider()
+
+    # ── List existing projects ─────────────────────────────────────────────────
+    projects_data, perr = api("GET", "/projects")
+    if perr:
+        st.error(f"Could not load projects: {perr}")
+    elif not projects_data or not projects_data.get("projects"):
+        st.info("No projects yet. Create one above.")
+    else:
+        projects = projects_data["projects"]
+
+        # Project selector
+        proj_labels = [f"{p['name']}  ({p['document_count']} file(s))" for p in projects]
+        proj_ids    = [p["project_id"] for p in projects]
+        chosen_label = st.selectbox("Select a project to open", proj_labels)
+        project_id   = proj_ids[proj_labels.index(chosen_label)]
+
+        # Load full project detail
+        proj, perr2 = api("GET", f"/projects/{project_id}")
+        if perr2:
+            st.error(f"Could not load project: {perr2}")
+        else:
+            st.subheader(proj["name"])
+            st.caption(f"ID: `{project_id}` | Created: {proj['created_at'][:10]}")
+
+            col_docs, col_upload = st.columns([1, 1])
+
+            # ── Documents in this project ─────────────────────────────────────
+            with col_docs:
+                st.markdown("**Documents in this project**")
+                docs = proj.get("documents", [])
+                if not docs:
+                    st.info("No files yet. Upload some on the right.")
+                else:
+                    for d in docs:
+                        status_icon = "✅" if d["processed"] else "⏳"
+                        st.markdown(
+                            f"{status_icon} **{d['title']}**  \n"
+                            f"Type: `{d['document_type']}` | Pages: {d['page_count']} | "
+                            f"`{d['document_id'][:8]}…`"
+                        )
+                        st.caption(f"Uploaded: {d['uploaded_at'][:19].replace('T', ' ')}")
+                        st.markdown("---")
+
+            # ── Multi-file upload ─────────────────────────────────────────────
+            with col_upload:
+                st.markdown("**Upload files to this project**")
+                uploaded_files = st.file_uploader(
+                    "Choose files (PDF, JPG, PNG, TIFF)",
+                    type=["pdf", "jpg", "jpeg", "png", "tiff", "tif"],
+                    accept_multiple_files=True,
+                    key=f"uploader_{project_id}",
+                )
+
+                if uploaded_files and st.button("Upload & Process All", type="primary"):
+                    file_tuples = [
+                        ("files", (f.name, f.getvalue(), f.type))
+                        for f in uploaded_files
+                    ]
+                    with st.spinner(f"Uploading {len(uploaded_files)} file(s)…"):
+                        data, err = api(
+                            "POST", f"/projects/{project_id}/upload",
+                            files=file_tuples,
+                        )
+
+                    if err:
+                        st.error(f"Upload failed: {err}")
+                    else:
+                        uploaded_list = data.get("uploaded", [])
+                        st.success(f"Queued {len(uploaded_list)} file(s) for processing.")
+
+                        # Poll each job until done
+                        for item in uploaded_list:
+                            job_id  = item["job_id"]
+                            fname   = item["filename"]
+                            bar     = st.progress(0, text=f"{fname}: starting…")
+                            for _ in range(60):
+                                time.sleep(2)
+                                job, _ = api("GET", f"/job/{job_id}")
+                                if not job:
+                                    break
+                                bar.progress(
+                                    min(job.get("progress", 0) / 100, 1.0),
+                                    text=f"{fname}: {job.get('stage', '…')} ({job.get('progress', 0)}%)",
+                                )
+                                if job.get("status") == "done":
+                                    bar.progress(1.0, text=f"{fname}: done ✅")
+                                    break
+                                elif job.get("status") == "failed":
+                                    bar.progress(0, text=f"{fname}: failed ❌")
+                                    break
+                        st.rerun()
+
+            st.divider()
+
+            # ── Cross-document draft ──────────────────────────────────────────
+            st.markdown("### Generate Draft Across All Documents")
+            st.caption("Retrieves evidence from every file in this project and merges the results.")
+
+            ready_docs = [d for d in proj.get("documents", []) if d["processed"]]
+            if not ready_docs:
+                st.info("No processed documents yet. Upload and wait for processing to finish.")
+            else:
+                st.success(f"{len(ready_docs)} document(s) ready for drafting.")
+                proj_query      = st.text_input("Query", placeholder="Summarize the compensation and termination terms", key="proj_query")
+                proj_draft_type = st.selectbox("Draft type", ["case_fact_summary"], key="proj_draft_type")
+
+                if st.button("Generate Project Draft", type="primary") and proj_query.strip():
+                    with st.spinner(f"Drafting across {len(ready_docs)} document(s)… this may take a moment."):
+                        result, err = api(
+                            "POST", f"/projects/{project_id}/draft",
+                            json={"query": proj_query, "draft_type": proj_draft_type},
+                        )
+
+                    if err:
+                        st.error(f"Draft failed: {err}")
+                    elif result:
+                        gs   = result.get("grounding_score", 0)
+                        icon = "🟢" if gs >= 0.75 else "🟡" if gs >= 0.5 else "🔴"
+                        st.success(
+                            f"{icon} Done — {result['documents_used']} document(s) used | "
+                            f"Avg grounding: {gs:.2f} | Patterns applied: {result.get('patterns_applied', 0)}"
+                        )
+
+                        # Group sections by source document
+                        sections = result.get("sections", [])
+                        by_doc: dict = {}
+                        for sec in sections:
+                            src = sec.get("source_document_title", "Unknown")
+                            by_doc.setdefault(src, []).append(sec)
+
+                        for doc_title, doc_sections in by_doc.items():
+                            st.markdown(f"#### Source: {doc_title}")
+                            for section in doc_sections:
+                                title = section.get("section_title") or section.get("title", "")
+                                sec_gs = section.get("grounding_score", 0)
+                                sec_icon = "🟢" if sec_gs >= 0.75 else "🟡" if sec_gs >= 0.5 else "🔴"
+                                st.markdown(f"**{title}** {sec_icon}")
+                                st.write(section.get("content", ""))
+
+                                cited = section.get("evidence_ids") or section.get("citedEvidence", [])
+                                if cited:
+                                    st.caption(f"Evidence cited: {', '.join(cited)}")
+                                st.markdown("---")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # PAGE 1 — UPLOAD
 # ══════════════════════════════════════════════════════════════════════════════
 
-if page == "Upload":
+elif page == "Upload":
     st.title("Upload Document")
     st.caption("Accepts PDF, JPG, PNG, TIFF. OCR runs automatically on scanned pages.")
 

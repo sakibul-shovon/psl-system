@@ -26,6 +26,17 @@ def _now() -> datetime:
     return datetime.utcnow()
 
 
+# ─── Project ───────────────────────────────────────────────────────────────────
+# A named case/matter that groups multiple documents together. Queries and
+# drafts can be run at the project level to pull evidence from all documents.
+
+class Project(SQLModel, table=True):
+    project_id: str = Field(default_factory=_uuid, primary_key=True)
+    name: str                               # e.g. "Case 20 — Specter v. Litt"
+    operator_id: str = "op_harvey"
+    created_at: datetime = Field(default_factory=_now)
+
+
 # ─── Document ──────────────────────────────────────────────────────────────────
 # One row per uploaded file. Tracks the file path, type classification,
 # and the structured fields Groq extracts (parties, dates, amounts).
@@ -41,6 +52,7 @@ class Document(SQLModel, table=True):
     structured_fields_json: Optional[str] = None   # JSON: {parties, dates, amounts, ...}
     operator_id: str = "op_harvey"
     page_count: int = 0
+    project_id: Optional[str] = Field(default=None, index=True)  # None = standalone doc
 
 
 # ─── Chunk ─────────────────────────────────────────────────────────────────────
