@@ -53,6 +53,7 @@ DOCUMENT TITLE: {document_title}
 {episodic_context}
 Rules:
 - 4 sections minimum, 7 maximum
+- retrieval_query MUST be a full natural language question (e.g. "What sanctions were imposed on Petitioner?"), NOT a keyword phrase or title (NOT "Sanctions on Petitioner")
 - Each retrieval_query must be specific to THAT section only (not the whole query)
 - target_length_words must be between 100 and 300
 - section_id must be "sec_1", "sec_2", etc.

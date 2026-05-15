@@ -23,6 +23,12 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 INSUFFICIENT_EVIDENCE_THRESHOLD = -3.0   # ms-marco raw logits: -10 to +10. -3 = clearly not relevant.
 
+# Cross-encoder hard limit: 512 BERT tokens total (query + content + 3 special tokens).
+# A 15-token query leaves ~494 tokens ≈ 1976 chars for content.
+# We use 1800 chars as a safe window to avoid off-by-one truncation.
+_CE_WINDOW_CHARS = 1800
+_CE_OVERLAP_CHARS = 400   # overlap between consecutive windows
+
 _model: Optional[CrossEncoder] = None
 _lock = threading.Lock()
 
@@ -40,6 +46,18 @@ def _get_model() -> CrossEncoder:
                 )
                 logger.info("Reranker model loaded.")
     return _model
+
+
+def _windows(text: str) -> list[str]:
+    """
+    Split text into overlapping windows that each fit the cross-encoder's
+    512-token BERT limit.  Returns the original text unchanged when it is
+    already short enough.
+    """
+    if len(text) <= _CE_WINDOW_CHARS:
+        return [text]
+    step = _CE_WINDOW_CHARS - _CE_OVERLAP_CHARS
+    return [text[i: i + _CE_WINDOW_CHARS] for i in range(0, len(text), step)]
 
 
 def rerank(
@@ -67,15 +85,27 @@ def rerank(
 
     model = _get_model()
 
-    # Build (query, chunk_text) pairs for the cross-encoder
-    # The cross-encoder scores each pair independently
-    pairs = [
-        (query, item["payload"].get("content", item.get("chunk_id", "")))
-        for item in candidates
-    ]
+    # For each candidate, split long content into overlapping windows so the
+    # cross-encoder's 512-token limit never silently drops tail content.
+    # We track which candidate each pair came from to aggregate scores.
+    pairs: list[tuple[str, str]] = []
+    pair_to_candidate: list[int] = []   # pairs[i] belongs to candidates[pair_to_candidate[i]]
+
+    for idx, item in enumerate(candidates):
+        content = item["payload"].get("content", item.get("chunk_id", ""))
+        for window in _windows(content):
+            pairs.append((query, window))
+            pair_to_candidate.append(idx)
 
     # scores is a numpy array of floats, one per pair
-    scores = model.predict(pairs)
+    raw_scores = model.predict(pairs)
+
+    # Aggregate: take the MAX window score for each candidate
+    candidate_scores = [-float("inf")] * len(candidates)
+    for pair_idx, cand_idx in enumerate(pair_to_candidate):
+        candidate_scores[cand_idx] = max(candidate_scores[cand_idx], float(raw_scores[pair_idx]))
+
+    scores = candidate_scores
 
     # Attach scores to candidates and sort
     scored = [

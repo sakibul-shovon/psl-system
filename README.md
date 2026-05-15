@@ -373,6 +373,122 @@ Interactive docs available at `http://localhost:8000/docs` when running.
 
 ---
 
+## Using the UI — Step-by-Step Guide
+
+Open **http://localhost:8501** after starting the stack. The sidebar has five pages.
+
+---
+
+### 1. Upload Documents
+
+**Sidebar → Upload**
+
+You can upload as many documents as you want — each one is stored and searchable independently. There is no limit on the number of documents in the system.
+
+1. Click **Browse files** and select a PDF or image (JPG/PNG).
+2. Click **Upload & Ingest**.
+3. A job ID appears — the page polls automatically. Wait for **"Ingestion complete"**.
+   - Text-layer PDFs: ~2–5 s/page
+   - Scanned PDFs (Tesseract OCR): ~10–15 s/page
+   - Handwritten pages (TrOCR): ~30–40 s/page
+4. Repeat for as many documents as needed. All ingested documents appear in the dropdown on every other page.
+
+**Example:** Upload `employment_agreement.pdf`, `court_brief.pdf`, and `nda.pdf` separately. Each is chunked and indexed independently so queries stay focused on the right document.
+
+---
+
+### 2. Query Evidence (search within a document)
+
+**Sidebar → Query**
+
+1. Select which document to search from the **Document dropdown** — all previously uploaded documents appear here.
+2. Type a factual question in plain English, e.g. *"What are the termination notice requirements?"*
+3. Click **Search**.
+4. Up to 5 evidence chunks appear from that document, each labelled **[E1]–[E5]** with:
+   - A relevance score (🟢 positive = highly relevant, 🟡/🔴 = weaker match)
+   - The breadcrumb showing exactly where in the document it came from (e.g. `ARTICLE IV > Section 4.2`)
+   - The full chunk text
+
+Queries are **per-document** — switch the dropdown to search a different document. This keeps evidence focused and prevents cross-document contamination.
+
+Use this page to verify a document was ingested correctly before generating a draft.
+
+---
+
+### 3. Generate a Draft
+
+**Sidebar → Draft**
+
+1. Select which document to draft from using the **Document dropdown** (same list as Query — all uploaded documents).
+2. Type your request, e.g. *"Summarise the compensation and termination clauses"* or ask a factual question.
+3. Optionally choose a **draft type** (case_fact_summary, clause_summary, etc.).
+4. Click **Generate Draft**.
+5. The pipeline runs (15–45 s). When done you will see:
+   - **Grounding score** — how well every claim is backed by evidence (🟢 ≥ 0.75 HIGH, 🟡 0.50–0.74 MEDIUM, 🔴 < 0.50 LOW)
+   - **Patterns applied** — number of learned style rules injected
+   - **Judge score** — independent LLM quality score out of 5
+   - Each section with its own grounding indicator
+
+---
+
+### 4. Submit Feedback (teach the system)
+
+**Sidebar → Draft → scroll down to "Review & Edit Draft"**
+
+After a draft is generated, a side-by-side editor appears below the output:
+
+1. The **left column** shows the original generated text (read-only).
+2. The **right column** is editable — make your corrections directly in the text area.
+3. Edit as many sections as needed.
+4. Click **Submit Edits**.
+
+What happens next (automatically, in the background):
+- Each changed section is classified by edit type (terminology, tone, citation style, etc.)
+- A generalised style rule is extracted — e.g. *"Use formal legal phrasing for severance terms"*
+- The rule is deduplicated against existing patterns (cosine ≥ 0.85 → reinforce; otherwise → new pattern)
+- On the **next** draft for a similar document type, the rule is injected into the prompt automatically
+
+Check **Sidebar → Metrics** after ~10 seconds to see the "Active patterns" count increase.
+
+---
+
+### 5. View Metrics and Learned Patterns
+
+**Sidebar → Metrics**
+
+- **System Counts** — documents ingested, chunks stored, drafts generated, edits submitted, active patterns
+- **Quality Averages** — average grounding score and judge score across all drafts
+- **Improvement Report** — before vs after patterns: grounding delta and judge-score delta
+- **Pattern List** — every learned rule with its frequency, confidence score, and last-reinforced date
+
+---
+
+### 6. Inspect Agent Traces
+
+**Sidebar → Traces**
+
+Each `/draft` call records a full execution trace:
+- Which LangGraph nodes fired (planner → executor × N → critic → refiner → assembler)
+- How many refinement iterations ran
+- Per-section grounding score and confidence
+- Wall-clock timing for each stage
+
+Use this to debug why a section was marked LOW or why the critic triggered a refinement round.
+
+---
+
+### Tips
+
+| Situation | What to do |
+|-----------|-----------|
+| Score shows INSUFFICIENT_EVIDENCE | The query didn't match any chunk well enough. Rephrase as a full natural-language question. |
+| Draft section says [INSUFFICIENT EVIDENCE] | That sub-topic isn't in the document. Check the Query page to confirm. |
+| Grounding score is LOW (🔴) | The LLM invented a fact not in evidence. Edit the section and submit feedback. |
+| Generation error / rate limit | Groq free tier: 12k tokens/minute. Wait ~60 s and retry. |
+| Scores show 0.000 in Query page | Restart the UI container: `docker compose restart ui` |
+
+---
+
 ## Quick Start — Docker (recommended)
 
 **Prerequisites:** Docker Desktop, a Gemini API key, a Groq API key.

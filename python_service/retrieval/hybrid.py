@@ -86,11 +86,11 @@ def retrieve(
 
     # ── Insufficient evidence guard ───────────────────────────────────────────
     if not is_sufficient(reranked):
+        from python_service.retrieval.reranker import INSUFFICIENT_EVIDENCE_THRESHOLD
         best = reranked[0]["rerank_score"] if reranked else 0.0
-        from python_service.retrieval.reranker import INSUFFICIENT_EVIDENCE_THRESHOLD as _THRESH
         logger.warning(
             "Insufficient evidence for query %r: best rerank score %.3f < %.1f",
-            query[:60], best, _THRESH,
+            query[:60], best, INSUFFICIENT_EVIDENCE_THRESHOLD,
         )
         return RetrievalResult(
             sufficient=False,

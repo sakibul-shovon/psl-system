@@ -251,11 +251,11 @@ if page == "Projects":
                                         icon="⚠️",
                                     )
                                 for ev in evidence:
-                                    score = ev.get("rerank_score", 0)
+                                    score = ev.get("relevance_score", ev.get("rerank_score", 0))
                                     score_color = "🟢" if score >= 0 else "🟡" if score >= -3 else "🔴"
                                     st.markdown(
                                         f"**[{ev['evidence_id']}]** `{ev.get('breadcrumb', '')}`  "
-                                        f"— {score_color} score: `{score:.2f}`"
+                                        f"— {score_color} score: `{score:.3f}`"
                                     )
                                     st.write(ev.get("content", ""))
                                     st.markdown("---")
@@ -406,7 +406,7 @@ elif page == "Query":
             st.success(f"Retrieved via **{data.get('retrieval_method', '?')}**")
             for ev in data.get("evidence", []):
                 with st.expander(
-                    f"**[{ev['evidence_id']}]** {ev.get('breadcrumb', '')} — score: {ev.get('rerank_score', 0):.3f}",
+                    f"**[{ev['evidence_id']}]** {ev.get('breadcrumb', '')} — score: {ev.get('relevance_score', ev.get('rerank_score', 0)):.3f}",
                     expanded=True,
                 ):
                     st.caption(f"Source: {ev.get('source_title', '')} | Confidence: {ev.get('confidence_tier', '')}")

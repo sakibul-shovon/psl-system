@@ -142,13 +142,23 @@ def executor_node(state: DraftingState) -> dict:
     brief         = section["brief"]
     query         = section["retrieval_query"]   # focused query for THIS section
     target_words  = section["target_length_words"]
+    original_query = state.get("query", query)   # user's original question
 
     logger.info("Executor [%s]: retrieving evidence for %r", section_id, title)
 
     # ── Step 1: Focused evidence retrieval ────────────────────────────────────
     # Each section runs its OWN retrieval with its own query.
-    # This is what separates Phase B from the old pipeline.
+    # If the focused sub-query fails, fall back to the original user query —
+    # the planner sometimes generates keyword-style sub-queries that the
+    # cross-encoder scores poorly compared to natural language questions.
     retrieval_result = retrieve(query, doc_id)
+
+    if not retrieval_result.sufficient and query != original_query:
+        logger.warning(
+            "Executor [%s]: sub-query %r insufficient — retrying with original query",
+            section_id, query,
+        )
+        retrieval_result = retrieve(original_query, doc_id)
 
     if not retrieval_result.sufficient:
         # Not enough evidence for this section — return a low-confidence draft

@@ -20,16 +20,33 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-MAX_TOKENS = 800        # chunks larger than this get split
+MAX_TOKENS = 400        # chunks larger than this get split; kept below cross-encoder's 512-token limit
 OVERLAP_SENTENCES = 1   # sentences carried over between sub-chunks for context
 CHARS_PER_TOKEN = 4     # rough approximation for English text
 
 # ── Header detection patterns (ordered by level) ─────────────────────────────
 _LEVEL_PATTERNS: list[tuple[int, re.Pattern]] = [
+    # ── Contracts / statutes ──────────────────────────────────────────────────
     (1, re.compile(r"^(ARTICLE|PART)\s+[IVXLCDM\d]+", re.IGNORECASE)),
     (2, re.compile(r"^(Section|SECTION)\s+\d+(\.\d+)*")),
     (3, re.compile(r"^\s*\(([a-z]|\d+)\)\s")),      # (a), (1)
     (4, re.compile(r"^\s+\([ivxlcdm]+\)\s")),         # (i), (ii)
+
+    # ── Court filings / briefs ────────────────────────────────────────────────
+    # Standalone all-caps heading line: INTRODUCTION, ARGUMENT, CONCLUSION,
+    # QUESTION PRESENTED, TABLE OF CONTENTS, RULE 29.6 STATEMENT, etc.
+    # Requires ≥ 6 chars, only uppercase letters / digits / spaces / dots.
+    (1, re.compile(r"^[A-Z][A-Z0-9 .]{4,}[A-Z]$")),
+    # Top-level lettered section: "A. The Petition Presents..." or "A.  Title"
+    # Matches single uppercase letter + period + 1+ spaces + uppercase word.
+    # Excludes "e.g.," / "Id." (lowercase after period) and "U.S. Courts"
+    # (second char after dot is not a space) — safe for brief section headers.
+    (2, re.compile(r"^[A-Z]\.\s+[A-Z][a-z]")),
+    # Sub-lettered section: "a. The Seventh Circuit..." (lowercase letter header)
+    (3, re.compile(r"^[a-z]\.\s+[A-Z][a-z]")),
+    # Numbered paragraph in brief argument: "1. According to Petitioner..."
+    # Requires lowercase after first word to avoid matching citations like "1. U.S.C."
+    (3, re.compile(r"^\d+\.\s+[A-Z][a-z]")),
 ]
 
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
