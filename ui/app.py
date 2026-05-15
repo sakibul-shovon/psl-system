@@ -427,7 +427,7 @@ elif page == "Draft":
         placeholder="Summarize the compensation and termination terms",
     )
     draft_type = st.selectbox("Draft type", ["case_fact_summary"])
-    live_mode = st.checkbox("Live progress (stream sections as they arrive)", value=True)
+    live_mode = False
 
     def _render_draft_result(data: dict):
         """Render metrics + sections from a completed draft dict."""
@@ -578,6 +578,7 @@ elif page == "Draft":
                             "agent_iterations": edata.get("agent_iterations", 0),
                             "trace_id":       None,
                         }
+                        st.rerun()
 
                     elif etype == "error":
                         status.error(f"Agent error: {edata.get('message', 'unknown')}")
@@ -625,13 +626,14 @@ elif page == "Feedback":
         edits = []
 
         for section in sections:
+            sid = section.get("section_id") or section.get("sectionId", "")
             st.markdown(f"#### {section.get('title', '')}")
             col_orig, col_edit = st.columns(2)
 
             with col_orig:
                 st.caption("Original (generated)")
                 st.text_area(
-                    f"original_{section['sectionId']}",
+                    f"original_{sid}",
                     value=section.get("content", ""),
                     height=200,
                     disabled=True,
@@ -641,14 +643,14 @@ elif page == "Feedback":
             with col_edit:
                 st.caption("Your edit")
                 edited = st.text_area(
-                    f"edit_{section['sectionId']}",
+                    f"edit_{sid}",
                     value=section.get("content", ""),
                     height=200,
                     label_visibility="collapsed",
                 )
 
             edits.append({
-                "section_id": section["sectionId"],
+                "section_id": sid,
                 "section_title": section.get("title", ""),
                 "original_text": section.get("content", ""),
                 "edited_text": edited,

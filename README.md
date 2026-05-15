@@ -375,7 +375,7 @@ Interactive docs available at `http://localhost:8000/docs` when running.
 
 ## Using the UI — Step-by-Step Guide
 
-Open **http://localhost:8501** after starting the stack. The sidebar has five pages.
+Open **http://localhost:8501** after starting the stack. The sidebar has eight pages: **Projects, Upload, Query, Draft, Feedback, Metrics, Comparison, Agent Trace**.
 
 ---
 
@@ -394,15 +394,24 @@ A **Project** is a named case or matter that groups multiple documents together.
 1. Use the **"Select a project to open"** dropdown — it shows all projects with their file count (e.g. *"check (6 file(s))"*).
 2. The project panel shows all documents in it with type, page count, and document ID.
 
-**Query across all project files:**
-- When you go to **Query** or **Draft** and select a project, evidence is retrieved from all documents in the project simultaneously.
-- This is the key difference from single-document mode: a question like *"What did the Second Circuit rule?"* will find the answer whether it's in the brief, the petition, or the circuit opinion.
+**Search across all project files (Query Across All Documents):**
+- Scroll down to the **"Query Across All Documents"** panel inside the Projects page.
+- Type a question and click **Search Project**.
+- Returns raw evidence chunks from every document in the project, grouped by file — no draft generated.
+- Use this to quickly locate which document contains the answer before drafting.
 
-**Example use case:** Upload all Jules v. Balazs documents into one project — petition, opposition brief, Second Circuit opinion, Supreme Court briefs. Then ask *"What sanctions were imposed and why?"* and get evidence pulled from whichever document contains the answer.
+**Generate a draft across all project files (Generate Draft Across All Documents):**
+- Scroll further down to **"Generate Draft Across All Documents"**.
+- Type your query and click **Generate Project Draft**.
+- The system retrieves evidence from **every document** in the project simultaneously, merges it, and runs the full LangGraph agent (planner → parallel executors → critic → assembler).
+- The resulting draft is grouped by source document so you can see which file each section draws from.
+- This is the key difference from the single-document Draft page: one query, all files, one merged output.
+
+**Example use case:** Upload all Jules v. Balazs documents into one project — petition, briefs, circuit opinion, Supreme Court opinion. Ask *"What sanctions were imposed and why?"* — evidence is pulled from whichever document contains the answer, across all files at once.
 
 ---
 
-### 2. Upload Documents
+### 3. Upload Documents
 
 **Sidebar → Upload**
 
@@ -420,7 +429,7 @@ You can upload as many documents as you want — each one is stored and searchab
 
 ---
 
-### 2. Query Evidence (search within a document)
+### 4. Query Evidence (search within a document)
 
 **Sidebar → Query**
 
@@ -438,14 +447,15 @@ Use this page to verify a document was ingested correctly before generating a dr
 
 ---
 
-### 3. Generate a Draft
+### 5. Generate a Draft
 
 **Sidebar → Draft**
 
 1. Select which document to draft from using the **Document dropdown** (same list as Query — all uploaded documents).
 2. Type your request, e.g. *"Summarise the compensation and termination clauses"* or ask a factual question.
 3. Optionally choose a **draft type** (case_fact_summary, clause_summary, etc.).
-4. Click **Generate Draft**.
+4. Leave **"Live progress"** unchecked if you plan to submit feedback afterward (checked = streaming mode, unchecked = reliable for Feedback).
+5. Click **Generate Draft**.
 5. The pipeline runs (15–45 s). When done you will see:
    - **Grounding score** — how well every claim is backed by evidence (🟢 ≥ 0.75 HIGH, 🟡 0.50–0.74 MEDIUM, 🔴 < 0.50 LOW)
    - **Patterns applied** — number of learned style rules injected
@@ -454,28 +464,37 @@ Use this page to verify a document was ingested correctly before generating a dr
 
 ---
 
-### 4. Submit Feedback (teach the system)
+### 6. Submit Feedback (teach the system)
 
-**Sidebar → Draft → scroll down to "Review & Edit Draft"**
+**Step 1 — Generate a draft on the Draft page first:**
 
-After a draft is generated, a side-by-side editor appears below the output:
+1. **Sidebar → Draft**
+2. Make sure **"Live progress"** is **unchecked** (it is unchecked by default)
+3. Select a document, type a query, click **Generate Draft**
+4. Wait for the spinner to finish and all sections to appear
 
-1. The **left column** shows the original generated text (read-only).
-2. The **right column** is editable — make your corrections directly in the text area.
-3. Edit as many sections as needed.
-4. Click **Submit Edits**.
+**Step 2 — Go to Feedback immediately:**
 
-What happens next (automatically, in the background):
-- Each changed section is classified by edit type (terminology, tone, citation style, etc.)
+1. **Sidebar → Feedback** (do not refresh the page or click anything else first)
+2. You will see a side-by-side editor with every section:
+   - **Left column** — original generated text (read-only)
+   - **Right column** — editable, make your corrections here
+3. Edit at least one section in the right column (fix wording, legal phrasing, tone, citations — anything)
+4. Scroll down and click **Submit Edits**
+
+**What happens next (automatically, in the background):**
+- Each changed section is classified by edit type (terminology, tone, citation style, structure, etc.)
 - A generalised style rule is extracted — e.g. *"Use formal legal phrasing for severance terms"*
-- The rule is deduplicated against existing patterns (cosine ≥ 0.85 → reinforce; otherwise → new pattern)
+- The rule is deduplicated against existing patterns (cosine ≥ 0.85 → reinforce existing; otherwise → insert new)
 - On the **next** draft for a similar document type, the rule is injected into the prompt automatically
 
-Check **Sidebar → Metrics** after ~10 seconds to see the "Active patterns" count increase.
+Check **Sidebar → Metrics** after ~10 seconds to see the "Active patterns" count increase and the new rule listed.
+
+> **Important:** The Feedback page only works with drafts from the **Draft page** (not the Project draft page). The draft is stored in browser session memory — if you refresh the page or close the tab, it is lost and you must generate a new draft before submitting feedback.
 
 ---
 
-### 5. View Metrics and Learned Patterns
+### 7. View Metrics and Learned Patterns
 
 **Sidebar → Metrics**
 
@@ -486,9 +505,22 @@ Check **Sidebar → Metrics** after ~10 seconds to see the "Active patterns" cou
 
 ---
 
-### 6. Inspect Agent Traces
+### 8. Compare Baseline vs Improved
 
-**Sidebar → Traces**
+**Sidebar → Comparison**
+
+Side-by-side view of draft quality **before** and **after** the pattern learning loop:
+- **Baseline** — drafts generated with zero learned patterns
+- **Improved** — drafts generated after patterns were extracted from operator edits
+- **Delta** — grounding score change and judge overall score change
+
+Use this to demonstrate that the learning loop is actually improving quality.
+
+---
+
+### 9. Inspect Agent Traces
+
+**Sidebar → Agent Trace**
 
 Each `/draft` call records a full execution trace:
 - Which LangGraph nodes fired (planner → executor × N → critic → refiner → assembler)
