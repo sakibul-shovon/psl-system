@@ -35,7 +35,7 @@
 19. [Deploy to Render](#deploy-to-render)
 20. [Latency Profile](#latency-profile)
 21. [Project Structure](#project-structure)
-22. [Assumptions and Tradeoffs](#assumptions-and-tradeoffs)
+22. [Assumptions and Tradeoffs](#assumptions-and-tradeoffs).
 23. [Known Limitations](#known-limitations)
 
 ---
@@ -99,13 +99,13 @@ flowchart TD
         KW["BM25 keyword\ntop-20"]
         RRF["Reciprocal Rank Fusion\nk=60"]
         RERANK["Cross-encoder rerank\nms-marco-MiniLM-L-6-v2\ntop-5"]
-        GUARD["Sufficiency guard\nbest score ≥ 0.35\nor INSUFFICIENT_EVIDENCE"]
+        GUARD["Sufficiency guard\nbest score ≥ -3.0\nor INSUFFICIENT_EVIDENCE"]
     end
 
     subgraph P3["Pillar 3 — Agentic Draft (LangGraph)"]
         PAT_RET["Pattern retriever\nQdrant learned_patterns\ncomposite re-rank"]
         EPI_RET["Episodic memory\n3 most similar past sessions"]
-        PLAN["Planner node\nGemini 2.5 Flash\n4–7 SectionPlan objects"]
+        PLAN["Planner node\nGroq Llama 3.3 70B\n4–7 SectionPlan objects"]
         DISPATCH["Dispatcher\nLangGraph Send — fan-out"]
         EXEC["Executor × N (parallel)\nper-section retrieval + generation\n+ NLI grounding"]
         CRIT["Critic node\ncheck grounding / completeness / style\nidentify weak sections"]
@@ -182,8 +182,7 @@ Line normaliser (dehyphenation, ligature fix, spacing)
 │  Every chunk carries a breadcrumb:                   │
 │    "Article 4 → Section 4.2 → Clause 4.2(b)"         │
 │                                                      │
-│  Target size: 400–600 tokens                         │
-│  Hard max:    800 tokens (split at sentence boundary)│
+│  Max size:    400 tokens (split at sentence boundary)│
 └─────────────────────────────────────────────────────┘
     │
     ▼
@@ -218,8 +217,9 @@ Cross-encoder rerank
     │
     ▼
 Sufficiency guard
-    best_score ≥ 0.35 → proceed with [E1]–[E5]
-    best_score < 0.35 → return INSUFFICIENT_EVIDENCE
+    best_score ≥ −3.0 → proceed with [E1]–[E5]
+    best_score < −3.0 → return INSUFFICIENT_EVIDENCE
+    (ms-marco raw logits: −10 to +10; −3.0 = clearly not relevant)
                         no generation proceeds
 ```
 
@@ -238,7 +238,7 @@ BM25 is essential for legal documents. Terms like `"Section 4.2(b)"`, `"Base Com
                                      ▼
                              ┌──────────────┐
                              │   Planner    │
-                             │  Gemini 2.5  │
+                             │  Groq 70B    │
                              │  4–7 section │
                              │  plans       │
                              └──────┬───────┘
@@ -287,7 +287,7 @@ Max refinement iterations: 3. If sections are still weak after 3 rounds, the Ass
 
 ### Layer 1: Retrieval sufficiency gate
 
-If the best cross-encoder rerank score across all candidate evidence chunks is below `0.35`, the pipeline returns `INSUFFICIENT_EVIDENCE`. No LLM generation call is made. The executor writes `[INSUFFICIENT EVIDENCE: <reason>]` into the draft and records `grounding_score = 0.0`.
+If the best cross-encoder rerank score across all candidate evidence chunks is below `−3.0` (raw ms-marco logit; scale is −10 to +10), the pipeline returns `INSUFFICIENT_EVIDENCE`. No LLM generation call is made. The executor writes `[INSUFFICIENT EVIDENCE: <reason>]` into the draft and records `grounding_score = 0.0`.
 
 ### Layer 2: NLI grounding verification
 
@@ -356,8 +356,8 @@ On next POST /draft for similar document type:
     │              + 0.20 × min(frequency / 10, 1.0)
     │              + 0.15 × exp(−days_since_reinforced / 30)
     │
-    └──→ Top patterns injected into Gemini prompt
-         Adherence checker verifies Gemini followed each one
+    └──→ Top patterns injected into generation prompt
+         Adherence checker verifies the model followed each one
 ```
 
 ---
@@ -582,15 +582,15 @@ Use this to debug why a section was marked LOW or why the critic triggered a ref
 
 ## Quick Start — Docker (recommended)
 
-**Prerequisites:** Docker Desktop, a Gemini API key, a Groq API key.
+**Prerequisites:** Docker Desktop, a Groq API key (and optionally a Gemini API key).
 
 ```powershell
-git clone <repo-url>
+git clone https://github.com/sakibul-shovon/psl-system.git
 cd psl-system
 
 # Copy environment template and fill in your keys
 Copy-Item .env.example .env
-# Edit .env: set GEMINI_API_KEY and GROQ_API_KEY
+# Edit .env: set GROQ_API_KEY (and optionally GEMINI_API_KEY)
 
 # Build images, start Qdrant + API + UI, wait for health, seed example data
 .\bootstrap.ps1
@@ -613,7 +613,7 @@ Copy-Item .env.example .env
 
 ```powershell
 # 1. Clone and create virtual environment
-git clone <repo-url>
+git clone https://github.com/sakibul-shovon/psl-system.git
 cd psl-system
 python -m venv .venv
 .venv\Scripts\Activate.ps1
@@ -647,8 +647,8 @@ Copy `.env.example` to `.env` and fill in:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes | Gemini 2.5 Flash for planning and generation |
-| `GROQ_API_KEY` | Yes | Llama 3.3 70B for classification, judging, and pattern extraction |
+| `GEMINI_API_KEY` | No | Optional — generation and planning use Groq; include if Gemini is re-enabled |
+| `GROQ_API_KEY` | Yes | Llama 3.3 70B for planning, generation, judging, and pattern extraction |
 | `QDRANT_URL` | Yes | Vector DB URL — `http://localhost:6333` for local Docker |
 | `QDRANT_API_KEY` | Cloud only | Required for Qdrant Cloud; leave empty for local |
 | `TESSERACT_CMD` | Yes (local) | Path to Tesseract binary. Not needed when using Docker. |
@@ -774,7 +774,7 @@ Measured on a development machine (CPU-only inference, no GPU).
 | BM25 retrieval (pickled index) | 10–30 ms |
 | Cross-encoder rerank (20 candidates) | 100–200 ms |
 | NLI grounding check (per sentence) | 40–80 ms |
-| Gemini generation (one section, API) | 2–5 s |
+| Groq generation (one section, API) | 1–3 s |
 | Groq judge (API) | 1–3 s |
 | Full `/draft` — 5 sections, no refinement | 15–30 s |
 | Full `/draft` — with one refinement round | 25–45 s |
@@ -788,7 +788,7 @@ The dominant cost is LLM API calls. All local ML inference (embedder, NLI, reran
 ```
 psl-system/
 ├── python_service/
-│   ├── main.py                  # FastAPI app, all 24 routes
+│   ├── main.py                  # FastAPI app, all 23 routes
 │   ├── config.py                # Pydantic settings — one place for all config
 │   ├── tracing.py               # TraceBuilder — per-stage wall-clock audit
 │   ├── jobs.py                  # In-memory job store for background ingestion
@@ -816,7 +816,7 @@ psl-system/
 │   │   ├── hybrid.py            # Orchestrates all retrieval stages
 │   │   └── evidence.py          # Package evidence into [E1]–[E5] format
 │   ├── nli/                     # DeBERTa NLI wrapper (~50 ms/sentence on CPU)
-│   ├── generation/              # Gemini prompt builder + grounding check
+│   ├── generation/              # Groq (Llama 3.3 70B) prompt builder + grounding check
 │   ├── edit_loop/
 │   │   ├── capture.py           # Store edits from POST /feedback
 │   │   ├── classifier.py        # Groq edit classification
@@ -824,7 +824,7 @@ psl-system/
 │   │   ├── pattern_retriever.py # Composite-score pattern retrieval
 │   │   └── processor.py         # Dedup + insert/reinforce pattern
 │   ├── evaluation/
-│   │   ├── adherence_checker.py # NLI check: did Gemini follow injected patterns?
+│   │   ├── adherence_checker.py # NLI check: did the model follow injected patterns?
 │   │   ├── draft_judge.py       # Groq 4-dimension judge (1–10 scoring)
 │   │   ├── improvement_validator.py # Before/after delta computation
 │   │   └── pattern_quality_gate.py  # Confidence + dedup gates
@@ -833,11 +833,11 @@ psl-system/
 │       ├── state.py             # DraftingState TypedDict + custom fan-in reducer
 │       ├── graph.py             # Compiled LangGraph StateGraph singleton
 │       └── nodes/
-│           ├── planner.py       # Gemini: decompose query into SectionPlan objects
+│           ├── planner.py       # Groq: decompose query into SectionPlan objects
 │           ├── dispatcher.py    # LangGraph Send fan-out
 │           ├── executor.py      # One section: retrieve + generate + NLI check
 │           ├── critic.py        # Identify weak sections by grounding / completeness / style
-│           ├── refiner.py       # Gemini: improved retrieval_query for weak sections
+│           ├── refiner.py       # Groq: improved retrieval_query for weak sections
 │           └── assembler.py     # Assemble + judge + save + trace
 ├── ui/
 │   └── app.py                   # Streamlit browser UI (PSL_API_URL configurable)
@@ -885,8 +885,7 @@ psl-system/
 | Decision | What was chosen | What was given up |
 |----------|----------------|-------------------|
 | **SQLite over PostgreSQL** | Zero-ops setup, easy Docker volume | Single-writer, no horizontal scale |
-| **Groq Llama 3.3 70B for generation** | Fast, free tier, JSON mode | 12k TPM / 100k TPD rate limits on free tier |
-| **Gemini 2.5 Flash for planning** | High quality multi-step reasoning | Paid API, latency ~2–5 s/call |
+| **Groq Llama 3.3 70B for all LLM tasks** | Fast, free tier, JSON mode — covers planning, generation, judging, and classification | 12k TPM / 100k TPD rate limits shared across all pipeline stages |
 | **CPU-only inference** | No GPU required, runs anywhere | Ingestion ~10–15 s/page for scanned docs |
 | **NLI sentence-level grounding** | Local, no API cost, fast | Cannot handle cross-sentence legal inferences |
 | **Cross-encoder rerank (ms-marco-MiniLM)** | Strong relevance scoring, 22 MB | 512-token BERT limit (mitigated with sliding window) |
